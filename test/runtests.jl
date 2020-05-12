@@ -1,11 +1,18 @@
 using EmbeddingTables
 using Test
+using Random
 
 # For testing gradients and SGD
 using Flux
 using Zygote
 
+# Make tests uniform.
+Random.seed!(1234)
+
+include("lookup.jl")
+include("update.jl")
 include("map.jl")
+
 
 @testset "EmbeddingTables.jl" begin
     # First, just test that an embedding table works like an array.

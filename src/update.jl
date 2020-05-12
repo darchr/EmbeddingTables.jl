@@ -5,9 +5,11 @@ struct SparseEmbeddingUpdate{I <: AbstractVector{<:Integer}, A <: AbstractArray}
 end
 
 # Apply the update
-function Flux.Optimise.update!(x::AbstractArray, xbar::SparseEmbeddingUpdate)
+function Flux.Optimise.update!(x::AbstractEmbeddingTable, xbar::SparseEmbeddingUpdate)
     for (col, update) in zip(xbar.indices, eachcol(xbar.delta))
-        @views x[:, col] .-= update
+        # Update on a column-by-column basis
+        v = columnview(x, col)
+        v .-= update
     end
 end
 
