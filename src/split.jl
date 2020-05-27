@@ -15,7 +15,10 @@ struct SplitEmbedding{T,A <: AbstractMatrix{T}} <: AbstractEmbeddingTable{T,2}
         data = map(1:nshards) do i
             start = cols_per_shard * (i - 1) + 1
             stop = min(i * cols_per_shard, size(A,2))
-            return A[:, start:stop]
+
+            B = similar(A, eltype(A), size(A, 1), stop - start + 1)
+            @views B .= A[:, start:stop]
+            return B
         end
         matrixsize = (size(A,1),cols_per_shard)
 

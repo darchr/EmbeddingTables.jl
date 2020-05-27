@@ -32,7 +32,7 @@ maplookup(x...) = lookup(x...)
 #
 # I really don't know why this is necessary, but it is.
 # TODO: I'm pretty sure this is a Zygote bug.
-function Zygote._pullback(cx::Zygote.AContext, ::typeof(maplookup), A::SimpleEmbedding, I)
+function Zygote._pullback(cx::Zygote.AContext, ::typeof(maplookup), A::AbstractEmbeddingTable, I)
     out = maplookup(A, I)
     return out, function pullback(Δ)
         ∇A = SparseEmbeddingUpdate(Δ, I)

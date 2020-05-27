@@ -13,9 +13,9 @@ Base.size(A::SimpleEmbedding) = size(A.data)
 Base.getindex(A::SimpleEmbedding, i::Int) = A.data[i]
 Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)
 
-#lookup(A::SimpleEmbedding, I::Vector{<:Integer}) = A[:, I]
 lookup(A::SimpleEmbedding, I) = _lookup(A.data, I)
 _lookup(A::AbstractEmbeddingTable, I) = error("Called `_lookup` on an EmbeddingTable")
+
 function _lookup(A::AbstractMatrix, I)
     nrows = size(A, 1)
     O = similar(A, eltype(A), nrows, length(I))
