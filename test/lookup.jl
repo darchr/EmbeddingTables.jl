@@ -1,49 +1,127 @@
-function test_routine(baseline, new)
-    @test size(baseline) == size(new)
-    @test length(baseline) == length(new)
+#####
+##### Setup
+#####
 
-    nrows, ncols = size(new)
+function non_reducing_lookup(
+    table::AbstractEmbeddingTable, baseline::Array; numtests = 10
+)
+    # Is "size" working properly?
+    @test size(table) == size(baseline)
+    @test length(table) == length(baseline)
+    nrows, ncols = size(table)
 
-    # Lookup all indices
-    I = shuffle(1:ncols)
+    ### Test 1: No repeats per lookup.
+    for _ in Base.OneTo(numtests)
+        indices = shuffle(1:ncols)
 
-    lookup_baseline = EmbeddingTables.lookup(baseline, I)
-    lookup_new = EmbeddingTables.lookup(new, I)
-
-    equal = (lookup_baseline == lookup_new)
-    @test equal
-    if !equal
-        # Find all the mismatching columns.
-        mismatch_cols = findall(eachcol(lookup_baseline) .!= eachcol(lookup_new))
-        @show mismatch_cols
+        lookup_ref = lookup(baseline, indices)
+        lookup_test = lookup(table, indices)
+        @test lookup_ref == lookup_test
     end
 
-    # Allow repeates
-    I = fill(rand(1:ncols), 10)
-    lookup_baseline = EmbeddingTables.lookup(baseline, I)
-    lookup_new = EmbeddingTables.lookup(new, I)
-    @test lookup_baseline == lookup_new
+    ### Test 2: Allow repeats
+    for _ in Base.OneTo(numtests)
+        indices = [rand(1:ncols) for _ = 1:ncols]
+
+        lookup_ref = lookup(baseline, indices)
+        lookup_test = lookup(table, indices)
+        @test lookup_ref == lookup_test
+    end
+    return nothing
 end
 
-@testset "Testing Lookup" begin
-    nrows = 32
-    ncols = 1000
+function reducing_lookup(
+    table::AbstractEmbeddingTable, baseline::Array; numtests = 10
+)
+    # Is "size" working properly?
+    @test size(table) == size(baseline)
+    @test length(table) == length(baseline)
+    nrows, ncols = size(table)
 
-    base = rand(Float32, nrows, ncols)
-
-    @testset "Testing Simple" begin
-        A = copy(base)
-        B = EmbeddingTables.SimpleEmbedding(copy(base))
-        test_routine(A, B)
+    ### Test 1: No repeats per lookup.
+    lookups_per_output = 12
+    for _ in Base.OneTo(numtests)
+        indices = reduce(vcat, [shuffle(2:ncols)' for _ in 1:lookups_per_output])
+        lookup_ref = lookup(baseline, indices)
+        lookup_test = lookup(table, indices)
+        @test lookup_ref == lookup_test
     end
 
-    @testset "Testing Split" begin
-        chunk_sizes = [10, 20, 30, 40, 50]
+    ### Test 2: Allow repeats
+    for _ in Base.OneTo(numtests)
+        indices = [rand(1:ncols) for _ in 1:lookups_per_output, _ in 1:ncols]
+        lookup_ref = lookup(baseline, indices)
+        lookup_test = lookup(table, indices)
+        @test lookup_ref == lookup_test
+    end
+    return nothing
+end
 
-        for cols_per_chunk in chunk_sizes
-            A = copy(base)
-            B = EmbeddingTables.SplitEmbedding(copy(base), cols_per_chunk)
-            test_routine(A, B)
+#####
+##### Tests
+#####
+
+@testset "Testing Lookup" begin
+    # Run across a range of rows to test the unrolling kernel
+    # Throw in the 1504 sized kernel as an oddball
+    nrows = [32, 64, 128, 256, 512, 1024, 1504]
+    ncols = 1000
+
+    @testset "Testing Standard Simple" begin
+        for rows in nrows
+            base = rand(Float32, rows, ncols)
+
+            # Dynamic
+            table = SimpleEmbedding(copy(base))
+            baseline = copy(base)
+            non_reducing_lookup(table, baseline)
+
+            # Static Sized
+            table = SimpleEmbedding{Static{rows}}(copy(base))
+            baseline = copy(base)
+            non_reducing_lookup(table, baseline)
+        end
+    end
+
+    @testset "Testing Reducing Simple" begin
+        for rows in nrows
+            base = rand(Float32, rows, ncols)
+
+            # Dynamic
+            table = SimpleEmbedding(copy(base))
+            baseline = copy(base)
+            reducing_lookup(table, baseline)
+
+            # Static Sized
+            table = SimpleEmbedding{Static{rows}}(copy(base))
+            baseline = copy(base)
+            reducing_lookup(table, baseline)
+        end
+    end
+
+    @testset "Testing Standard Split" begin
+        chunk_sizes = [10, 20, 30, 40, 50]
+        for rows in nrows
+            base = rand(Float32, rows, ncols)
+
+            for cols_per_chunk in chunk_sizes
+                table = SplitEmbedding(copy(base), cols_per_chunk)
+                baseline = copy(base)
+                non_reducing_lookup(table, baseline)
+            end
+        end
+    end
+
+    @testset "Testing Reducing Split" begin
+        chunk_sizes = [10, 20, 30, 40, 50]
+        for rows in nrows
+            base = rand(Float32, rows, ncols)
+
+            for cols_per_chunk in chunk_sizes
+                table = SplitEmbedding(copy(base), cols_per_chunk)
+                baseline = copy(base)
+                reducing_lookup(table, baseline)
+            end
         end
     end
 end

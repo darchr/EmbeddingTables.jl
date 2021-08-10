@@ -1,28 +1,52 @@
 # Very simple, basic implementation of an embedding lookup.
-struct SimpleEmbedding{T,A <: AbstractMatrix{T}} <: AbstractEmbeddingTable{T,2}
-#struct SimpleEmbedding{T,A <: AbstractMatrix{T}} <: AbstractEmbeddingTable{T,2}
+struct SimpleEmbedding{S,T,A<:AbstractMatrix{T}} <: AbstractEmbeddingTable{S,T}
     data::A
+
+    # -- Inner constructors
+    # Have two flavors - one for dynamic sizes, one for static sizes
+    SimpleEmbedding(A::AbstractMatrix{T}) where {T} = new{Dynamic,T,typeof(A)}(A)
+    function SimpleEmbedding{Static{N}}(A::AbstractMatrix{T}) where {N,T}
+        if !isa(N, Int)
+            msg = """
+            Expected the type parameter for `Static{N}` to be an Int.
+            Instead, it's a $(typeof(N))!
+            """
+            throw(ArgumentError(msg))
+        end
+
+        if N != size(A, 1)
+            msg = """
+            Parameter `N` should match the number of rows in the passed Matrix.
+            Instead, `N = $N` while `size(A,1) = $(size(A, 1))`.
+            """
+            throw(ArgumentError(msg))
+        end
+        table = new{Static{N},T,typeof(A)}(A)
+        require_cache_alignment(table)
+        return table
+    end
 end
 
-# TODO: Do testing with `views` in Julia 1.5, since a lot of work has gone into making them
-# faster and allocate less.
-unsafe_column_pointer(A::SimpleEmbedding, i::Integer) = unsafe_column_pointer(A.data, i)
+function Base.zeros(x::SimpleEmbedding{S,T}) where {S,T}
+    newdata = similar(x.data)
+    newdata .= zero(T)
+    return SimpleEmbedding{S}(newdata)
+end
+
+#####
+##### Array Interface
+#####
 
 # Implement Array Interface
 Base.size(A::SimpleEmbedding) = size(A.data)
 Base.getindex(A::SimpleEmbedding, i::Int) = A.data[i]
 Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)
 
-lookup(A::SimpleEmbedding, I) = _lookup(A.data, I)
-_lookup(A::AbstractEmbeddingTable, I) = error("Called `_lookup` on an EmbeddingTable")
+#####
+##### EmbeddingTable Interface
+#####
 
-function _lookup(A::AbstractMatrix, I)
-    nrows = size(A, 1)
-    O = similar(A, eltype(A), nrows, length(I))
-    @inbounds for (col, i) in enumerate(I)
-        ptrA = unsafe_column_pointer(A, i)
-        ptrO = unsafe_column_pointer(O, col)
-        unsafe_copyto!(ptrO, ptrA, nrows)
-    end
-    return O
-end
+Base.pointer(A::SimpleEmbedding) = pointer(A.data)
+columnpointer(A::SimpleEmbedding, i::Integer) = columnpointer(A.data, i)
+example(A::SimpleEmbedding) = A.data
+

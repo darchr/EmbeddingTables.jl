@@ -2,24 +2,18 @@
 # correctly register the gradients.
 #
 # This test checks both that this case still fails and tests my workaround.
-create_ensemble(dims; kw...) = create_ensemble(lookup, dims; kw...)
-function create_ensemble(f, dims; kw...)
-    params = map(dims) do dim
-        return SimpleEmbedding(rand(Float32, dim))
-    end
-
-    return (I, y) -> Flux.mse(vcat(map(f, params, I)...), y), Flux.Params(params)
+function create_ensemble(dims)
+    return [EmbeddingTables.SimpleEmbedding(rand(Float32, dim)) for dim in dims]
 end
 
+_normalize(x::AbstractVector) = reduce(vcat, x)
+_normalize(x) = x
+
+loss_wrap(f) = (y, x...) -> Flux.mse(_normalize(f(x...)), y)
+
 @testset "Testing Map" begin
-    # Base case: Test that gradients are not recorded properly.
-    #
     # Create three lookup tables
-    dims = [
-        (5, 5),
-        (5, 10),
-        (5, 15),
-    ]
+    dims = [(5, 5), (5, 10), (5, 15)]
 
     # Create input indices and the "expected" result.
     batchsize = 5
@@ -27,28 +21,53 @@ end
     y = rand(Float32, sum(first.(dims)), batchsize)
 
     # Create the function over normal arrays to avoid hitting our workaround.
-    f, params = create_ensemble(dims)
+    tables = create_ensemble(dims)
+    grads = Zygote.gradient(loss_wrap((x...) -> map(lookup, x...)), y, tables, I)
 
-    grads = Zygote.gradient(params) do
-        f(I, y)
-    end
-
-    for p in params
-        @test grads.grads[p] === nothing
-    end
-
-    #####
-    ##### Now, verify that our workaround for the `SimpleEmbedding` works.
-    #####
-
-    f, params = create_ensemble(EmbeddingTables.maplookup, dims)
-    grads = Zygote.gradient(params) do
-        f(I, y)
-    end
-    for (i, p) in enumerate(params)
-        u = grads.grads[p]
-        @test isa(u, EmbeddingTables.SparseEmbeddingUpdate)
+    # Gradients for the lookup table are at index 2
+    for (i, grad) in enumerate(grads[2])
+        @test isa(grad, EmbeddingTables.SparseEmbeddingUpdate)
         # Make sure indices were captured correctly.
-        @test u.indices == I[i]
+        @test grad.indices == I[i]
+    end
+
+    #####
+    ##### Now, verify that `SimpleEmbedding` works.
+    #####
+
+    grads = Zygote.gradient(loss_wrap(maplookup), y, tables, I)
+    for (i, grad) in enumerate(grads[2])
+        @test isa(grad, EmbeddingTables.SparseEmbeddingUpdate)
+        # Make sure indices were captured correctly.
+        @test grad.indices == I[i]
+    end
+
+    #####
+    ##### Try "PreallocationStrategy"
+    #####
+
+    f = (x...) -> maplookup(PreallocationStrategy(), x...)
+    grads2 = Zygote.gradient(loss_wrap(f), y, tables, I)
+
+    for (i, grad) in enumerate(grads2[2])
+        @test isa(grad, EmbeddingTables.SparseEmbeddingUpdate)
+        # Make sure indices were captured correctly.
+        @test grad.indices == I[i]
+        @test grad.delta == grads[2][i].delta
+        @test grad.indices == grads[2][i].indices
+    end
+
+    # Retry with prepadding
+    # Use a view of the output to keep dimensions happy with the "y" matrix used as the
+    # dummy target.
+    f = (x...) -> @views(maplookup(PreallocationStrategy(20), x...)[21:end, :])
+    grads2 = Zygote.gradient(loss_wrap(f), y, tables, I)
+
+    for (i, grad) in enumerate(grads2[2])
+        @test isa(grad, EmbeddingTables.SparseEmbeddingUpdate)
+        # Make sure indices were captured correctly.
+        @test grad.indices == I[i]
+        @test grad.delta == grads[2][i].delta
+        @test grad.indices == grads[2][i].indices
     end
 end
