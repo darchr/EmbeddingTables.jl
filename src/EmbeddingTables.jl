@@ -77,7 +77,7 @@ featuresize(A::AbstractEmbeddingTable{Static{N}}) where {N} = N
 Base.@propagate_inbounds function columnpointer(A::AbstractMatrix{T}, i::Integer) where {T}
     return pointer(A) + strides(A)[2] * sizeof(T) * (i - 1)
 end
-@inline columnview(A::AbstractMatrix, i) = view(A, 1:size(A, 1), i)
+@inline columnview(A::AbstractMatrix, i) = Base.unsafe_view(A, Base.OneTo(featuresize(A)), i)
 
 # Interface
 function lookup end

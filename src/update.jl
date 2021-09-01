@@ -17,12 +17,24 @@ function Flux.Optimise.update!(
     return nothing
 end
 
-@generated function Flux.Optimise.update!(
+function Flux.Optimise.update!(
     x::AbstractEmbeddingTable{Static{N},T},
-    xbar::SparseEmbeddingUpdate{Static{N},A,I},
+    xbar::SparseEmbeddingUpdate{Static{N}},
     numcols::Integer,
-) where {N,T,A,I<:AbstractVector}
-    return emit_update(T, N)
+) where {N,T}
+    svec = SVector{N,T}
+    src = xbar.delta
+    dst = x
+
+    iter = view(xbar.indices, Base.OneTo(numcols))
+    for (src_col, dst_col) in enumerate(iter)
+        src_ptr = Ptr{svec}(columnpointer(src, src_col))
+        dst_ptr = Ptr{svec}(columnpointer(dst, dst_col))
+
+        v = unsafe_load(dst_ptr) - unsafe_load(src_ptr)
+        unsafe_store!(dst_ptr, v)
+    end
+    return nothing
 end
 
 #####

@@ -48,5 +48,6 @@ Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)
 
 Base.pointer(A::SimpleEmbedding) = pointer(A.data)
 columnpointer(A::SimpleEmbedding, i::Integer) = columnpointer(A.data, i)
+columnview(A::SimpleEmbedding, i::Integer) = columnview(A.data, i)
 example(A::SimpleEmbedding) = A.data
 

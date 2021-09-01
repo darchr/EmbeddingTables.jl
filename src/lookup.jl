@@ -38,18 +38,34 @@ end
 function lookup!(
     dst, src::AbstractEmbeddingTable{Static{N},T}, indices::AbstractVector{<:Integer}
 ) where {T,N}
-    __lookup!(dst, src, indices)
+    cache_aligned_error(dst)
+    #svec = SVector{N,T}
+    for (dst_col, src_col) in enumerate(indices)
+        @inbounds src_ptr = columnpointer(src, src_col)
+        @inbounds dst_ptr = columnpointer(dst, dst_col)
+
+        for i in 1:N
+            @_ivdep_meta
+            @_interleave_meta(8)
+            unsafe_store!(dst_ptr, unsafe_load(src_ptr, i), i)
+        end
+    end
 end
 
 # fallback dynamic implementation
 function lookup!(
-    O, A::AbstractEmbeddingTable{Dynamic,T}, I::AbstractVector{<:Integer}
+    dst, src::AbstractEmbeddingTable{Dynamic,T}, indices::AbstractVector{<:Integer}
 ) where {T}
-    nrows = featuresize(A)
-    for (col, i) in enumerate(I)
-        @inbounds ptrA = columnpointer(A, i)
-        @inbounds ptrO = columnpointer(O, col)
-        unsafe_copyto!(ptrO, ptrA, nrows)
+    nrows = featuresize(src)
+    for (dst_col, src_col) in enumerate(indices)
+        @inbounds src_ptr = columnpointer(src, src_col)
+        @inbounds dst_ptr = columnpointer(dst, dst_col)
+
+        for i in Base.OneTo(nrows)
+            @_ivdep_meta
+            @_interleave_meta(8)
+            unsafe_store!(dst_ptr, unsafe_load(src_ptr, i), i)
+        end
     end
 end
 
@@ -57,10 +73,23 @@ end
 
 # Optimized static branch.
 # Implementation is in "simd.jl"
-@generated function lookup!(
+function lookup!(
     dst, src::AbstractEmbeddingTable{Static{N},T}, indices::AbstractMatrix{<:Integer}
 ) where {T,N}
-    return emit_lookup_reducing(T, N)
+    svec = SVector{N,T}
+    sz = size(indices, 1)
+    for dst_col in Base.OneTo(size(indices, 2))
+        @_ivdep_meta
+
+        # Move the first element to the destination, then sum.
+        src_col = @inbounds(indices[1, dst_col])
+        accum = unsafe_load(Ptr{svec}(columnpointer(src, src_col)))
+        for offset = 2:sz
+            src_col = @inbounds(indices[offset, dst_col])
+            accum += unsafe_load(Ptr{svec}(columnpointer(src, src_col)))
+        end
+        unsafe_store!(Ptr{svec}(columnpointer(dst, dst_col)), accum)
+    end
 end
 
 # fallback dynamic implementation
@@ -71,16 +100,14 @@ function lookup!(
     sz1, sz2 = size(I)
     for j in Base.OneTo(sz2)
         vO = columnview(O, j)
-        first = true
-        for i in Base.OneTo(sz1)
-            col = I[i, j]
-            vA = columnview(A, col)
-            if first
-                vO .= vA
-                first = false
-            else
-                vO .+= vA
-            end
+        # First iteration
+        @inbounds col = I[1, j]
+        vO .= columnview(A, col)
+
+        # Accumulate all other times.
+        for i in 2:sz1
+            @inbounds col = I[i,j]
+            vO .+= columnview(A, col)
         end
     end
     return nothing
@@ -168,6 +195,8 @@ end
 #
 # This may involve preallocating some space in the first few rows of the destination
 # array to make space for inserting the result of the bottom MLP.
+#
+# TODO: Can we make the threading a little more finegrained for better threading?
 struct PreallocationStrategy <: AbstractExecutionStrategy
     # Allow for extra rows to be placed at the beginning of the destination to allow
     # the results of dense computation to be inserted inplace.

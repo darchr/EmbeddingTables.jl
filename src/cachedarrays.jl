@@ -18,10 +18,10 @@ end
 end
 
 @annotate function Flux.update!(
-    x::EmbeddingTables.SimpleEmbedding{Static{N},<:Any,<:UnwritableCachedArray},
-    xbar::EmbeddingTables.SparseEmbeddingUpdate{Static{N},<:Any,<:AbstractVector},
+    x::EmbeddingTables.SimpleEmbedding{Static{N},T,<:UnwritableCachedArray},
+    xbar::EmbeddingTables.SparseEmbeddingUpdate{Static{N},<:AbstractMatrix,<:AbstractVector},
     numcols::Integer,
-) where {N}
+) where {N,T}
     return __recurse__(__writable__(x), xbar, numcols)
 end
 

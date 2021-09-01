@@ -48,7 +48,7 @@ function _update_inner(
         )
         @test isapprox(diff_baseline, uncompressed)
 
-        # Need to create a new closure because "chunch" effectively destroys the old
+        # Need to create a new closure because "crunch" effectively destroys the old
         # version of "indices" that gets captured by the original pullback.
         out_ref, back_ref = Zygote._pullback(lookup, baseline, copy(indices_base))
         out, back = Zygote._pullback(lookup, table, copy(indices_base))
@@ -62,6 +62,32 @@ function _update_inner(
         @test isa(zeros_table, AbstractEmbeddingTable)
         Flux.Optimise.update!(opt, zeros_baseline, diff_baseline)
         Flux.Optimise.update!(opt, zeros_table, diff_table)
+        @test isapprox(zeros_baseline, zeros_table)
+
+        #####
+        #####
+        #####
+
+        # Also try with with the partitioner to ensure that it's logic is correct.
+        out_ref, back_ref = Zygote._pullback(lookup, copy(baseline), copy(indices_base))
+        out, back = Zygote._pullback(lookup, table, copy(indices_base))
+
+        diff_baseline = back_ref(diff_out)[2]
+        diff_table = back(diff_out)[2]
+
+        zeros_baseline = zeros(eltype(baseline), size(baseline))
+        zeros_table = zeros(table)
+
+        @test isa(zeros_table, AbstractEmbeddingTable)
+        Flux.Optimise.update!(opt, zeros_baseline, diff_baseline)
+
+        # Partitioned updates
+        update_batchsize = div(size(diff_table.delta, 2), 10) + 1
+        partitions = EmbeddingTables.UpdatePartitioner(diff_table, update_batchsize)
+        for subtable in partitions
+            Flux.Optimise.update!(opt, zeros_table, subtable)
+        end
+
         @test isapprox(zeros_baseline, zeros_table)
     end
 end
@@ -108,29 +134,29 @@ end
         @test view(delta, :, i) == expected
     end
 
-    ### Multiple Lookup Case
-    delta = rand(Float32, 16, 5)
-    delta_old = copy(delta)
+    # ### Multiple Lookup Case
+    # delta = rand(Float32, 16, 5)
+    # delta_old = copy(delta)
 
-    old_indices = [
-        4 1 4 2 1;
-        5 1 3 3 2;
-    ]
-    indices = copy(old_indices)
+    # old_indices = [
+    #     4 1 4 2 1;
+    #     5 1 3 3 2;
+    # ]
+    # indices = copy(old_indices)
 
-    update_old = SparseEmbeddingUpdate{Static{size(delta, 1)}}(delta, indices)
-    update, newlength = EmbeddingTables.crunch(update_old)
+    # update_old = SparseEmbeddingUpdate{Static{size(delta, 1)}}(delta, indices)
+    # update, newlength = EmbeddingTables.crunch(update_old)
 
-    # By necessity, a different object should be returned.
-    @test update !== update_old
-    @test newlength == length(unique(indices))
-    @test view(update.indices, 1:newlength) == unique(indices)
-    delta = update.delta
+    # # By necessity, a different object should be returned.
+    # @test update !== update_old
+    # @test newlength == length(unique(indices))
+    # @test view(update.indices, 1:newlength) == unique(indices)
+    # delta = update.delta
 
-    for i in 1:newlength
-        expected = sum(getindex.(Ref(delta_old), :, findcols(update.indices[i], old_indices)))
-        @test view(delta, :, i) == expected
-    end
+    # for i in 1:newlength
+    #     expected = sum(getindex.(Ref(delta_old), :, findcols(update.indices[i], old_indices)))
+    #     @test view(delta, :, i) == expected
+    # end
 end
 
 @testset "Testing Update" begin

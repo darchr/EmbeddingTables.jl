@@ -53,8 +53,8 @@ function crunch(
     end
     num_unique_indices = length(translation)
 
-    # Now, create a new SparseEmbeddingUpdate that is large enough to hold our potentially
-    # expanded result.
+    # Too many unique indices, allocate another SparseEmbeddingUpdate that is large
+    # enough to store the crunched version.
     src_delta = src.delta
     src_indices = src.indices
     dst_delta = similar(
@@ -175,6 +175,6 @@ function Base.iterate(x::UpdatePartitioner{S,A,I}, _ = nothing) where {S,A,I}
     subdelta = view(delta, :, base:upper)
     subindices = _maybeslice(indices, base:upper)
     x.base = upper + 1
-    return SparseEmbeddingUpdate{S}(subdelta, subindices)
+    return (SparseEmbeddingUpdate{S}(subdelta, subindices), nothing)
 end
 
