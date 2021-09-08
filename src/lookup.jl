@@ -34,17 +34,14 @@ end
 ### Non-reducing
 
 # Optimized static branch.
-# Implementation is in "simd.jl"
 function lookup!(
     dst, src::AbstractEmbeddingTable{Static{N},T}, indices::AbstractVector{<:Integer}
 ) where {T,N}
-    cache_aligned_error(dst)
-    #svec = SVector{N,T}
     for (dst_col, src_col) in enumerate(indices)
         @inbounds src_ptr = columnpointer(src, src_col)
         @inbounds dst_ptr = columnpointer(dst, dst_col)
 
-        for i in 1:N
+        for i in Base.OneTo(N)
             @_ivdep_meta
             @_interleave_meta(8)
             unsafe_store!(dst_ptr, unsafe_load(src_ptr, i), i)
@@ -80,7 +77,6 @@ function lookup!(
     sz = size(indices, 1)
     for dst_col in Base.OneTo(size(indices, 2))
         @_ivdep_meta
-
         # Move the first element to the destination, then sum.
         src_col = @inbounds(indices[1, dst_col])
         accum = unsafe_load(Ptr{svec}(columnpointer(src, src_col)))
@@ -197,30 +193,46 @@ end
 # array to make space for inserting the result of the bottom MLP.
 #
 # TODO: Can we make the threading a little more finegrained for better threading?
-struct PreallocationStrategy <: AbstractExecutionStrategy
+struct PreallocationStrategy{T} <: AbstractExecutionStrategy
     # Allow for extra rows to be placed at the beginning of the destination to allow
     # the results of dense computation to be inserted inplace.
     prependrows::Int
 end
-PreallocationStrategy() = PreallocationStrategy(0)
+
+PreallocationStrategy() = PreallocationStrategy{Any}(0)
+PreallocationStrategy(x::Integer) = PreallocationStrategy{Any}(x)
+
+_select_eltype(::Type{Any}, ::Type{T}) where {T} = T
+_select_eltype(::Type{U}, ::Type{T}) where {U,T} = U
 
 _batchsize(x::AbstractVector{<:AbstractVector}) = length(first(x))
 _batchsize(x::AbstractMatrix{<:Integer}) = size(x, 1)
-
 _batchsize(x::AbstractVector{<:AbstractMatrix}) = size(first(x), 2)
 _batchsize(x::ColumnWrap) = _batchsize(unwrap(x))
 
+cdiv(a::Integer, b::Integer) = cdiv(promote(a, b)...)
+cdiv(a::T, b::T) where {T<:Integer} = one(T) + div(a - one(T), b)
+
 function maplookup(
-    strategy::PreallocationStrategy, x::Vector{<:AbstractEmbeddingTable{T}}, _I
-) where {T}
+    strategy::PreallocationStrategy{U}, x::Vector{<:AbstractEmbeddingTable{<:Any,T}}, _I
+) where {U,T}
+    worksize_div = 4
+
     # Preallocate destination.
     I = ManualMemory.Reference(colwrap(_I))
     rows = featuresize.(x)
     offset = strategy.prependrows
     batchsize = _batchsize(_I)
-    data = similar(example(x[1]), strategy.prependrows + sum(rows), batchsize)
+    worksize = cdiv(batchsize, worksize_div)
 
-    # For deciding where to index
+    data = similar(
+        example(x[1]),
+        _select_eltype(U,T),
+        (strategy.prependrows + sum(rows), batchsize),
+    )
+
+    # Chunk up the destination array into pieces.
+    # Each piece serves as the destination for an embedding table lookup.
     rows_sum = cumsum(rows)
     pushfirst!(rows_sum, 0)
     views = map(eachindex(x)) do i
@@ -228,8 +240,30 @@ function maplookup(
         stop = offset + rows_sum[i + 1]
         return view(data, start:stop, Base.OneTo(batchsize))
     end
-    Polyester.@batch per=core for i in eachindex(x)
-        lookup!(views[i], x[i], ManualMemory.dereference(I)[i])
+
+    # Implement the poor man's dynamic load balancing.
+    len = worksize_div * length(x)
+    count = Threads.Atomic{Int}(1)
+    Polyester.@batch per=core for _z in Base.OneTo(Threads.nthreads())
+        while true
+            k = Threads.atomic_add!(count, 1)
+            k > len && break
+
+            # Convert this in to a big and little index
+            i, j = _divrem_index(k, worksize_div)
+
+            # Compute the start and the stop indices along the batch dimension.
+            start = (j - 1) * worksize + 1
+            stop = min(j * worksize, batchsize)
+
+            # Slice along the batch dimension
+            v = view(views[i], :, start:stop)
+            table = x[i]
+            indices = view(ManualMemory.dereference(I)[i], start:stop)
+
+            # Finally, perform the final lookup
+            lookup!(v, table, indices)
+        end
     end
     return data
 end

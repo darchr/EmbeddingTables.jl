@@ -22,7 +22,7 @@ struct SimpleEmbedding{S,T,A<:AbstractMatrix{T}} <: AbstractEmbeddingTable{S,T}
             throw(ArgumentError(msg))
         end
         table = new{Static{N},T,typeof(A)}(A)
-        require_cache_alignment(table)
+        #require_cache_alignment(table)
         return table
     end
 end
