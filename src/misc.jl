@@ -1,4 +1,32 @@
 #####
+##### Compiler Hints
+#####
+
+# If we ever go back to using nontemporal stores
+function sfence()
+    str = raw"""
+        tail call void asm sideeffect "sfence", "~{memory},~{dirflag},~{fpsr},~{flags}"()
+        ret void
+        """
+    return Base.llvmcall(str, Nothing, Tuple{})
+end
+
+# Tells Julia that each iteration of the loop is independant.
+# Useful for loops using raw loads and stores.
+macro _ivdep_meta()
+    return Expr(:loopinfo, Symbol("julia.ivdep"))
+end
+
+# Hint for LLVM - tell it how many iterations of a loop to unroll.
+macro _interleave_meta(n)
+    return Expr(:loopinfo, (Symbol("llvm.loop.interleave.count"), n))
+end
+
+macro _unroll_meta()
+    return Expr(:loopinfo, Symbol("llvm.loop.unroll.enable"))
+end
+
+#####
 ##### Slicing
 #####
 

@@ -22,7 +22,6 @@ struct SimpleEmbedding{S,T,A<:AbstractMatrix{T}} <: AbstractEmbeddingTable{S,T}
             throw(ArgumentError(msg))
         end
         table = new{Static{N},T,typeof(A)}(A)
-        #require_cache_alignment(table)
         return table
     end
 end
@@ -38,9 +37,10 @@ end
 #####
 
 # Implement Array Interface
-Base.size(A::SimpleEmbedding) = size(A.data)
-Base.getindex(A::SimpleEmbedding, i::Int) = A.data[i]
-Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)
+Base.size(A::SimpleEmbedding, dim) = size(A.data, dim)
+#Base.size(A::SimpleEmbedding) = size(A.data)
+Base.@propagate_inbounds Base.getindex(A::SimpleEmbedding, i::Int) = A.data[i]
+Base.@propagate_inbounds Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)
 
 #####
 ##### EmbeddingTable Interface

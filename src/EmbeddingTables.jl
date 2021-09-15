@@ -10,17 +10,14 @@ export lookup, maplookup
 # strategies
 export DefaultStrategy, SimpleParallelStrategy, PreallocationStrategy, Slicer
 
-# local deps
-using CachedArrays
-
 # deps
-import ChainRulesCore
-import DataStructures
+import ArrayInterface: ArrayInterface, static
+import ChainRulesCore: ChainRulesCore, NoTangent
 import Flux
+import LoopVectorization
 import ManualMemory
 import Polyester
-import SIMD
-import StaticArrays: SVector
+import StaticArrays: StaticArrays, SVector
 import UnPack: @unpack
 
 # Execution strategies describe how to perform `maplookup` across an ensemble of embedding
@@ -30,7 +27,7 @@ import UnPack: @unpack
 #
 # This provides an entry point for developing strategies specialized for PMM
 abstract type AbstractExecutionStrategy end
-const VecOrMat{T} = Union{<:AbstractVector{T}, <:AbstractMatrix{T}}
+const VecOrMat{T} = Union{<:AbstractVector{T},<:AbstractMatrix{T}}
 
 #####
 ##### Embedding Table API
@@ -45,53 +42,70 @@ struct Dynamic <: AbstractLookupType end
 struct Static{N} <: AbstractLookupType end
 Static(N) = Static{N}()
 
-# For now, require nice alignment for static kernels.
-const VECTOR_WIDTH_BYTES = 64
-function require_cache_alignment(::Type{Static{N}}, ::Type{T}) where {N,T}
-    rem = mod(sizeof(T) * N, VECTOR_WIDTH_BYTES)
-    if !iszero(rem)
-        msg = """
-        Due to implementation limitations, the feature size for static lookup
-        kernels must align to $VECTOR_WIDTH_BYTES bytes!
-
-        For feature size $N, this is instead $(rem)!
-        """
-        throw(ArgumentError(msg))
-    end
-    return nothing
-end
-
 # Supertype for Embedding Tables
 abstract type AbstractEmbeddingTable{S<:AbstractLookupType,T} <: AbstractArray{T,2} end
-function require_cache_alignment(::AbstractEmbeddingTable{Static{N},T}) where {N,T}
-    return require_cache_alignment(Static{N}, T)
-end
-require_cache_alignment(::AbstractEmbeddingTable{Dynamic}) = nothing
 
 # Some generic interface implementations for AbstractEmbeddingTables
 Base.IndexStyle(::AbstractEmbeddingTable) = Base.IndexLinear()
 
 featuresize(A::AbstractMatrix) = size(A, 1)
-featuresize(A::AbstractEmbeddingTable{Static{N}}) where {N} = N
-
 Base.@propagate_inbounds function columnpointer(A::AbstractMatrix{T}, i::Integer) where {T}
     return pointer(A) + strides(A)[2] * sizeof(T) * (i - 1)
 end
-@inline columnview(A::AbstractMatrix, i) = Base.unsafe_view(A, Base.OneTo(featuresize(A)), i)
+@inline columnview(A::AbstractMatrix, i::Integer) = columnview(A, axes(A, static(1)), i)
+@inline columnview(A::AbstractMatrix, slice, i::Integer) = Base.unsafe_view(A, slice, i)
+
+example(x::Vector{<:AbstractEmbeddingTable}) = example(first(x))
+
+#####
+##### ArrayInterface compat
+#####
+
+ArrayInterface.can_change_size(::Type{<:AbstractEmbeddingTable}) = false
+ArrayInterface.can_setindex(::Type{<:AbstractEmbeddingTable}) = true
+ArrayInterface.contiguous_axis(::Type{<:AbstractEmbeddingTable}) = static(1)
+
+# In general, specific intantiations of embedding tables might not define strides,
+# especially if they are split into multiple subtables.
+ArrayInterface.defines_strides(::Type{<:AbstractEmbeddingTable}) = false
+ArrayInterface.fast_scalar_indexing(::Type{<:AbstractEmbeddingTable}) = false
+ArrayInterface.has_parent(::Type{<:AbstractEmbeddingTable}) = static(false)
+ArrayInterface.is_column_major(::Type{<:AbstractEmbeddingTable}) = static(true)
+
+# Known sizing
+ArrayInterface.known_size(::Type{<:AbstractEmbeddingTable{Static{N}}}) where {N} =
+    (static(N), nothing)
+ArrayInterface.known_size(::Type{<:AbstractEmbeddingTable{Dynamic}}) = (nothing, nothing)
+
+function ArrayInterface.axes_types(::Type{<:AbstractEmbeddingTable})
+    return Tuple{Base.OneTo{Int},Base.OneTo{Int}}
+end
+function ArrayInterface.axes_types(::Type{<:AbstractEmbeddingTable{Static{N}}}) where {N}
+    return Tuple{StaticArrays.SOneTo{N},Base.OneTo{Int}}
+end
+
+function Base.axes(A::AbstractEmbeddingTable{Static{N}}) where {N}
+    return (StaticArrays.SOneTo{N}(), Base.OneTo(size(A, 2)))
+end
+
+Base.size(A::AbstractEmbeddingTable) = (Base.size(A, 1), Base.size(A, 2))
+function ArrayInterface.size(A::AbstractEmbeddingTable{Static{N}}) where {N}
+    return (static(N), Base.size(A, 2))
+end
+
+#####
+##### Implementation
+#####
 
 # Interface
 function lookup end
-include("simd.jl")
+include("misc.jl")
 include("sparseupdate.jl")
-include("slicer.jl")
 include("lookup.jl")
 include("update.jl")
 
 # Embedding Table struct implementations
 include("simple.jl")
 include("split.jl")
-
-# CachedArray Strategies
-include("cachedarrays.jl")
 
 end

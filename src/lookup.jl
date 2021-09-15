@@ -16,98 +16,142 @@ end
 ##### lookup
 #####
 
-_trailing_size(x::AbstractArray) = size(x)[end]
+_trailing_size(x::AbstractArray{<:Any,N}) where {N} = size(x, N)
 
 # Need these definitions to avoid method ambiguity
 @inline lookup(A::AbstractEmbeddingTable, I::AbstractVector{<:Integer}) = _lookup(A, I)
 @inline lookup(A::AbstractEmbeddingTable, I::AbstractMatrix{<:Integer}) = _lookup(A, I)
 
-function _lookup(A::AbstractEmbeddingTable{S,T}, I::VecOrMat{<:Integer}) where {S,T}
+function _lookup(A::AbstractEmbeddingTable, I::VecOrMat{<:Integer})
     nrows = featuresize(A)
-    O = similar(example(A), T, nrows, _trailing_size(I))
-    # inner `lookup!` dispatches to either an optimized static or dynamic fallback
-    # implementations.
+    O = similar(example(A), eltype(A), nrows, _trailing_size(I))
     lookup!(O, A, I)
     return O
 end
 
-### Non-reducing
+#####
+##### Non-reducing
+#####
 
-# Optimized static branch.
-function lookup!(
-    dst, src::AbstractEmbeddingTable{Static{N},T}, indices::AbstractVector{<:Integer}
-) where {T,N}
+function lookup!(dst, src::AbstractEmbeddingTable, indices::AbstractVector{<:Integer})
     for (dst_col, src_col) in enumerate(indices)
-        @inbounds src_ptr = columnpointer(src, src_col)
-        @inbounds dst_ptr = columnpointer(dst, dst_col)
+        @inbounds src_view = columnview(src, src_col)
+        @inbounds dst_view = columnview(dst, dst_col)
 
-        for i in Base.OneTo(N)
+        @inbounds for i in ArrayInterface.axes(src, static(1))
             @_ivdep_meta
             @_interleave_meta(8)
-            unsafe_store!(dst_ptr, unsafe_load(src_ptr, i), i)
+            dst_view[i] = src_view[i]
         end
     end
 end
 
-# fallback dynamic implementation
-function lookup!(
-    dst, src::AbstractEmbeddingTable{Dynamic,T}, indices::AbstractVector{<:Integer}
-) where {T}
-    nrows = featuresize(src)
-    for (dst_col, src_col) in enumerate(indices)
-        @inbounds src_ptr = columnpointer(src, src_col)
-        @inbounds dst_ptr = columnpointer(dst, dst_col)
+#####
+##### Reducing (sum)
+#####
 
-        for i in Base.OneTo(nrows)
-            @_ivdep_meta
-            @_interleave_meta(8)
-            unsafe_store!(dst_ptr, unsafe_load(src_ptr, i), i)
-        end
-    end
-end
-
-### Reducing (sum)
-
-# Optimized static branch.
-# Implementation is in "simd.jl"
-function lookup!(
-    dst, src::AbstractEmbeddingTable{Static{N},T}, indices::AbstractMatrix{<:Integer}
-) where {T,N}
-    svec = SVector{N,T}
-    sz = size(indices, 1)
-    for dst_col in Base.OneTo(size(indices, 2))
+function _reducing_lookup_kernel(
+    ::Type{SVector{N,T}},
+    table::AbstractEmbeddingTable,
+    indices::AbstractVector,
+    offset::Integer,
+) where {N,T}
+    Base.@_inline_meta
+    col = @inbounds indices[1]
+    # Move the first element into registers
+    ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col)) + offset
+    accumulator = unsafe_load(ptr)
+    for i = 2:(lastindex(indices))
         @_ivdep_meta
-        # Move the first element to the destination, then sum.
-        src_col = @inbounds(indices[1, dst_col])
-        accum = unsafe_load(Ptr{svec}(columnpointer(src, src_col)))
-        for offset = 2:sz
-            src_col = @inbounds(indices[offset, dst_col])
-            accum += unsafe_load(Ptr{svec}(columnpointer(src, src_col)))
+        col = @inbounds indices[i]
+        ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col)) + offset
+        accumulator += unsafe_load(ptr)
+    end
+    return accumulator
+end
+
+function _reducing_lookup_kernel!(
+    ::Type{SVector{N,T}},
+    dst,
+    src::AbstractEmbeddingTable,
+    indices::AbstractMatrix{<:Integer},
+    offset::Integer,
+) where {N,T}
+    Base.@_inline_meta
+    for dst_col in axes(dst, 2)
+        accumulator = _reducing_lookup_kernel(
+            SVector{N,T},
+            src,
+            Base.unsafe_view(indices, axes(indices, static(1)), dst_col),
+            offset,
+        )
+        dst_ptr = Ptr{SVector{N,T}}(columnpointer(dst, dst_col)) + offset
+        unsafe_store!(dst_ptr, accumulator)
+    end
+    return nothing
+end
+
+# Maximum amount of state we will keep in the CPU registers during accumulation.
+# If necessary, we will make multiple passes for larger feature sizes.
+const MAX_ACCUMULATOR_SIZE = 2048
+@generated function lookup!(
+    dst,
+    src::AbstractEmbeddingTable{Static{N},T},
+    indices::AbstractMatrix{<:Integer},
+) where {N,T}
+    Base.@_inline_meta
+    # First , check if we can hold all partial state in registers.
+    # If so, emit the simplest kernel possible.
+    # Otherwise, just fall back to the generic implementation.
+    # The static sizing information will carry over to the code generation.
+    bytes = N * sizeof(T)
+    if bytes <= MAX_ACCUMULATOR_SIZE
+        return :(_reducing_lookup_kernel!(SVector{N,T}, dst, src, indices, 0))
+    else
+        return quote
+            Base.invoke(
+                lookup!,
+                Tuple{$dst,AbstractEmbeddingTable,$indices},
+                dst,
+                src,
+                indices
+           )
         end
-        unsafe_store!(Ptr{svec}(columnpointer(dst, dst_col)), accum)
     end
 end
 
-# fallback dynamic implementation
+# fallback implementation
 function lookup!(
-    O, A::AbstractEmbeddingTable{Dynamic,T}, I::AbstractMatrix{<:Integer}
-) where {T}
-    nrows = featuresize(A)
-    sz1, sz2 = size(I)
-    for j in Base.OneTo(sz2)
-        vO = columnview(O, j)
+    O,
+    A::AbstractEmbeddingTable,
+    I::AbstractMatrix{<:Integer},
+)
+    for j in axes(I, 2)
+        vO = columnview(O, axes(A, 1), j)
         # First iteration
-        @inbounds col = I[1, j]
-        vO .= columnview(A, col)
+        col = @inbounds I[1, j]
+        vA = columnview(A, col)
+        @inbounds for k in axes(A, 1)
+            @_interleave_meta(8)
+            vO[k] = vA[k]
+        end
 
         # Accumulate all other times.
-        for i in 2:sz1
-            @inbounds col = I[i,j]
-            vO .+= columnview(A, col)
+        for i in 2:size(I, 1)
+            col = @inbounds I[i, j]
+            vA = columnview(A, col)
+            @inbounds for k in axes(A, 1)
+                @_interleave_meta(8)
+                vO[k] = vA[k]
+            end
         end
     end
     return nothing
 end
+
+############################################################################################
+# Multiple table lookups
+############################################################################################
 
 #####
 ##### ColumnWrap
@@ -118,11 +162,12 @@ struct ColumnWrap{A}
     array::A
 end
 
-_colons(::AbstractArray{T,N}) where {T,N} = ntuple(_ -> :, Val(N-1))
+_colons(::AbstractArray{T,N}) where {T,N} = ntuple(_ -> :, Val(N - 1))
+_colons(x::ColumnWrap) = _colons(unwrap(x))
 
 unwrap(x::ColumnWrap) = x.array
 Base.eachindex(x::ColumnWrap) = Base.OneTo(length(x))
-Base.getindex(x::ColumnWrap, i::Integer) = view(x.array, _colons(x.array)..., i)
+Base.getindex(x::ColumnWrap, i::Integer) = view(unwrap(x), _colons(x)..., i)
 Base.length(x::ColumnWrap) = size(x.array, ndims(x.array))
 function Base.iterate(x::ColumnWrap, i = 1)
     return in(i, eachindex(x)) ? (@inbounds(x[i]), i + 1) : nothing
@@ -137,50 +182,48 @@ colwrap(x::AbstractArray) = ColumnWrap(x)
 ##### maplookup
 #####
 
-function maplookup(x::Vector{A}, i...) where {A<:AbstractEmbeddingTable}
-    return maplookup(DefaultStrategy(), x, i...)
+### Default Strategy
+struct DefaultStrategy <: AbstractExecutionStrategy end
+maplookup(x::Vector{<:AbstractEmbeddingTable}, i...) = maplookup(DefaultStrategy(), x, i...)
+function maplookup(strategy::DefaultStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
+    return maplookup_impl(strategy, x, colwrap(I))
 end
 
+function maplookup_impl(_::DefaultStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
+    return map(lookup, x, colwrap(I))
+end
+
+# Generic pullback
 function ChainRulesCore.rrule(
-    ::typeof(maplookup),
+    ::typeof(maplookup_impl),
     strategy::AbstractExecutionStrategy,
     A::Vector{<:AbstractEmbeddingTable{S}},
     I,
 ) where {S}
-    function maplookup_pullback(Δs)
-        return (
-            ChainRulesCore.NoTangent(),
-            ChainRulesCore.NoTangent(),
-            map(SparseEmbeddingUpdate{S}, Δs, colwrap(I)),
-            ChainRulesCore.NoTangent(),
-        )
-    end
     result = maplookup(strategy, A, I)
+    function maplookup_pullback(Δs)
+        return (NoTangent(), NoTangent(), map(SparseEmbeddingUpdate{S}, Δs, I), NoTangent())
+    end
     return result, maplookup_pullback
 end
 
-### Default Strategy
-# Just all "lookup" on each table.
-struct DefaultStrategy <: AbstractExecutionStrategy end
-function maplookup(
-    strategy::DefaultStrategy, x::Vector{A}, I
-) where {A<:AbstractEmbeddingTable}
-    return map(lookup, x, colwrap(I))
+### Simple Parallel strategy.
+# Thread lookups using Polyester.
+struct SimpleParallelStrategy <: AbstractExecutionStrategy end
+function maplookup(strategy::SimpleParallelStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
+    return maplookup_impl(strategy, x, colwrap(I))
 end
 
-### Simple Parallel strategy.
-# Thread lookups using Julia's normal multi-threading.
-struct SimpleParallelStrategy <: AbstractExecutionStrategy end
-function maplookup(::SimpleParallelStrategy, x::Vector{<:AbstractEmbeddingTable}, _I)
+function maplookup_impl(_::SimpleParallelStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
     out = Vector{typeof(example(x[1]))}(undef, length(x))
 
     # Need to capture this as a `ManualMemory.reference` to keep ManualMemory
     # from exploding while trying to store all the cached array stuff.
-    I = ManualMemory.Reference(colwrap(_I))
+    ref = ManualMemory.Reference(I)
 
     # Note - this is a hack to get around Polyester doing something weird!
-    Polyester.@batch per=core for i in eachindex(x)
-        out[i] = lookup(x[i], ManualMemory.dereference(I)[i])
+    Polyester.@batch (per = core) for i in eachindex(x)
+        out[i] = lookup(x[i], ManualMemory.dereference(ref)[i])
     end
     return out
 end
@@ -213,23 +256,26 @@ _batchsize(x::ColumnWrap) = _batchsize(unwrap(x))
 cdiv(a::Integer, b::Integer) = cdiv(promote(a, b)...)
 cdiv(a::T, b::T) where {T<:Integer} = one(T) + div(a - one(T), b)
 
-function maplookup(
-    strategy::PreallocationStrategy{U}, x::Vector{<:AbstractEmbeddingTable{<:Any,T}}, _I
+function maplookup(strategy::PreallocationStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
+    return maplookup_impl(strategy, x, colwrap(I))
+end
+
+function maplookup_impl(
+    strategy::PreallocationStrategy{U},
+    x::Vector{<:AbstractEmbeddingTable{<:Any,T}},
+    I,
 ) where {U,T}
     worksize_div = 4
 
     # Preallocate destination.
-    I = ManualMemory.Reference(colwrap(_I))
-    rows = featuresize.(x)
+    ref = ManualMemory.Reference(I)
+    rows = map(featuresize, x)
     offset = strategy.prependrows
-    batchsize = _batchsize(_I)
+    batchsize = _batchsize(I)
     worksize = cdiv(batchsize, worksize_div)
 
-    data = similar(
-        example(x[1]),
-        _select_eltype(U,T),
-        (strategy.prependrows + sum(rows), batchsize),
-    )
+    ncols = strategy.prependrows + sum(rows)
+    data = similar(example(x), _select_eltype(U, T), (ncols, batchsize))
 
     # Chunk up the destination array into pieces.
     # Each piece serves as the destination for an embedding table lookup.
@@ -244,7 +290,7 @@ function maplookup(
     # Implement the poor man's dynamic load balancing.
     len = worksize_div * length(x)
     count = Threads.Atomic{Int}(1)
-    Polyester.@batch per=core for _z in Base.OneTo(Threads.nthreads())
+    Polyester.@batch (per = core) for _ in Base.OneTo(Threads.nthreads())
         while true
             k = Threads.atomic_add!(count, 1)
             k > len && break
@@ -259,7 +305,7 @@ function maplookup(
             # Slice along the batch dimension
             v = view(views[i], :, start:stop)
             table = x[i]
-            indices = view(ManualMemory.dereference(I)[i], start:stop)
+            indices = view(ManualMemory.dereference(ref)[i], start:stop)
 
             # Finally, perform the final lookup
             lookup!(v, table, indices)
@@ -268,23 +314,19 @@ function maplookup(
     return data
 end
 
+# Specialized `rrule` that knows how to deal with the pre-pended columns.
 function ChainRulesCore.rrule(
-    ::typeof(maplookup),
+    ::typeof(maplookup_impl),
     strategy::PreallocationStrategy,
     A::Vector{<:AbstractEmbeddingTable{S}},
-    _I,
+    I,
 ) where {S}
-    I = colwrap(_I)
     data = maplookup(strategy, A, I)
     function maplookup_pullback(Δ)
         f = Slicer(strategy.prependrows + 1, 1, Δ)
         δs = map((y, x) -> SparseEmbeddingUpdate{S}(f(featuresize(y)), x), A, I)
-        return (
-            ChainRulesCore.NoTangent(),
-            ChainRulesCore.NoTangent(),
-            δs,
-            ChainRulesCore.NoTangent(),
-        )
+        return (NoTangent(), NoTangent(), δs, NoTangent())
     end
     return data, maplookup_pullback
 end
+
