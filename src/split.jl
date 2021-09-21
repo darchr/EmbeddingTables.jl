@@ -49,20 +49,22 @@ end
 __compare(::Type{Static{N}}, n) where {N} = @assert N == n
 __compare(::Type{Dynamic}, n) = nothing
 
+@inline _shardsize(A::SplitEmbedding) = A.matrixsize[2]
+
 #####
 ##### Array Interface
 #####
 
 # Helper Functions
-_divrem_index(i, x) = _divrem_index(Int(i), Int(x))
-function _divrem_index(i::Int, x::Int)
+@inline _divrem_index(i, x) = _divrem_index(Int(i), Int(x))
+@inline function _divrem_index(i::Int, x::Int)
+    i -= 1
     a = Base.sdiv_int(i, x)
     b = Base.srem_int(i, x)
-    # In the case where the remainder is zero, we actually need to step back one chunk.
-    return iszero(b) ? (a, x) : (a + 1, b)
+    return (a + 1), (b + 1)
 end
 
-chunkindex(A::SplitEmbedding, i::Int) = _divrem_index(i, prod(A.matrixsize))
+@inline chunkindex(A::SplitEmbedding, i::Int) = _divrem_index(i, prod(A.matrixsize))
 
 # Interface
 function Base.size(A::SplitEmbedding)
@@ -91,15 +93,17 @@ end
 
 example(A::SplitEmbedding) = first(A.data)
 Base.@propagate_inbounds function columnpointer(A::SplitEmbedding, i::Integer)
-    # Find the chunk and return the column from that chunk
-    chunk, col = _divrem_index(i, A.matrixsize[2])
-    data = A.data[chunk]
+    chunk, col = _divrem_index(i, _shardsize(A))
+    @boundscheck checkbounds(A.data, chunk)
+    data = @inbounds A.data[chunk]
     return columnpointer(data, col)
 end
 
 # Return a column view of some underlying chunk
 Base.@propagate_inbounds @inline function columnview(A::SplitEmbedding, i::Integer)
-    chunk, col = _divrem_index(i, A.matrixsize[2])
-    return columnview(A.data[chunk], col)
+    chunk, col = _divrem_index(i, _shardsize(A))
+    @boundscheck checkbounds(A.data, chunk)
+    data = @inbounds A.data[chunk]
+    return columnview(data, axes(A,1), col)
 end
 

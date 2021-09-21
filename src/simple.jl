@@ -37,7 +37,7 @@ end
 #####
 
 # Implement Array Interface
-Base.size(A::SimpleEmbedding, dim) = size(A.data, dim)
+Base.size(A::SimpleEmbedding) = size(A.data)
 #Base.size(A::SimpleEmbedding) = size(A.data)
 Base.@propagate_inbounds Base.getindex(A::SimpleEmbedding, i::Int) = A.data[i]
 Base.@propagate_inbounds Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)

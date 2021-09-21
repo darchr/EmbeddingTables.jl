@@ -44,18 +44,15 @@ function translate!(dict::Dict, indices)
     return length(dict)
 end
 
-function crunch(
-    src::SparseEmbeddingUpdate{Static{N},A,<:AbstractVector},
-    translation::Dict{Int,Int} = Dict{Int,Int}();
-) where {N,A}
+function crunch(src::SparseEmbeddingUpdate{<:Any,<:Any,<:AbstractVector}, translation::Dict{Int,Int} = Dict{Int,Int}())
     translate!(translation, src.indices)
     return _crunch!(src, src, translation)
 end
 
 function crunch(
-    src::SparseEmbeddingUpdate{Static{N},A,<:AbstractMatrix},
+    src::SparseEmbeddingUpdate{S, <:Any, <:AbstractMatrix},
     translation::Dict{Int,Int} = Dict{Int,Int}();
-) where {N,A}
+) where {S}
     # Use our dictionary to count the number of unique indices.
     num_target_cols = translate!(translation, src.indices)
 
@@ -65,7 +62,7 @@ function crunch(
     src_indices = src.indices
     dst_delta = similar(src_delta, eltype(src_delta), size(src_delta, 1), num_target_cols)
     dst_indices = similar(src_delta, eltype(src_indices), num_target_cols)
-    dst = SparseEmbeddingUpdate{Static{N}}(dst_delta, dst_indices)
+    dst = SparseEmbeddingUpdate{S}(dst_delta, dst_indices)
     return _crunch!(dst, src, translation)
 end
 

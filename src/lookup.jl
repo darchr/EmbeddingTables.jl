@@ -16,6 +16,10 @@ end
 ##### lookup
 #####
 
+# Maximum amount of state we will keep in the CPU registers during accumulation.
+# If necessary, we will make multiple passes for larger feature sizes.
+const MAX_ACCUMULATOR_SIZE = 1024
+
 _trailing_size(x::AbstractArray{<:Any,N}) where {N} = size(x, N)
 
 # Need these definitions to avoid method ambiguity
@@ -33,6 +37,7 @@ end
 ##### Non-reducing
 #####
 
+# Generic fallback case
 function lookup!(dst, src::AbstractEmbeddingTable, indices::AbstractVector{<:Integer})
     for (dst_col, src_col) in enumerate(indices)
         @inbounds src_view = columnview(src, src_col)
@@ -46,6 +51,49 @@ function lookup!(dst, src::AbstractEmbeddingTable, indices::AbstractVector{<:Int
     end
 end
 
+# single-shot load + store up to MAX_ACCUMULATOR_SIZE
+function _lookup_kernel!(
+    ::Type{SVector{N,T}},
+    dst,
+    src::AbstractEmbeddingTable,
+    indices::AbstractVector{<:Integer},
+) where {N,T}
+    Base.@_inline_meta
+    @inbounds for dst_col in axes(dst, 2)
+        @_ivdep_meta
+        src_col = indices[dst_col]
+        src_ptr = convert(Ptr{SVector{N,T}}, columnpointer(src, src_col))
+        dst_ptr = convert(Ptr{SVector{N,T}}, columnpointer(dst, dst_col))
+        unsafe_store!(dst_ptr, unsafe_load(src_ptr))
+    end
+    return nothing
+end
+
+@generated function lookup!(
+    dst,
+    src::AbstractEmbeddingTable{Static{N},T},
+    indices::AbstractVector{<:Integer},
+) where {N,T}
+    Base.@_inline_meta
+    # First, check if we can do this in a single shot.
+    # If so, do that.
+    # Otherwise, invoke the generic fallback.
+    bytes = N * sizeof(T)
+    if bytes <= MAX_ACCUMULATOR_SIZE
+        return :(_lookup_kernel!(SVector{N,T}, dst, src, indices))
+    else
+        return quote
+            Base.invoke(
+                lookup!,
+                Tuple{$dst,AbstractEmbeddingTable,$indices},
+                dst,
+                src,
+                indices
+           )
+        end
+    end
+end
+
 #####
 ##### Reducing (sum)
 #####
@@ -54,17 +102,16 @@ function _reducing_lookup_kernel(
     ::Type{SVector{N,T}},
     table::AbstractEmbeddingTable,
     indices::AbstractVector,
-    offset::Integer,
 ) where {N,T}
     Base.@_inline_meta
     col = @inbounds indices[1]
     # Move the first element into registers
-    ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col)) + offset
+    ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col))
     accumulator = unsafe_load(ptr)
     for i = 2:(lastindex(indices))
         @_ivdep_meta
         col = @inbounds indices[i]
-        ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col)) + offset
+        ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col))
         accumulator += unsafe_load(ptr)
     end
     return accumulator
@@ -75,7 +122,6 @@ function _reducing_lookup_kernel!(
     dst,
     src::AbstractEmbeddingTable,
     indices::AbstractMatrix{<:Integer},
-    offset::Integer,
 ) where {N,T}
     Base.@_inline_meta
     for dst_col in axes(dst, 2)
@@ -83,17 +129,13 @@ function _reducing_lookup_kernel!(
             SVector{N,T},
             src,
             Base.unsafe_view(indices, axes(indices, static(1)), dst_col),
-            offset,
         )
-        dst_ptr = Ptr{SVector{N,T}}(columnpointer(dst, dst_col)) + offset
+        dst_ptr = Ptr{SVector{N,T}}(columnpointer(dst, dst_col))
         unsafe_store!(dst_ptr, accumulator)
     end
     return nothing
 end
 
-# Maximum amount of state we will keep in the CPU registers during accumulation.
-# If necessary, we will make multiple passes for larger feature sizes.
-const MAX_ACCUMULATOR_SIZE = 2048
 @generated function lookup!(
     dst,
     src::AbstractEmbeddingTable{Static{N},T},
@@ -106,7 +148,7 @@ const MAX_ACCUMULATOR_SIZE = 2048
     # The static sizing information will carry over to the code generation.
     bytes = N * sizeof(T)
     if bytes <= MAX_ACCUMULATOR_SIZE
-        return :(_reducing_lookup_kernel!(SVector{N,T}, dst, src, indices, 0))
+        return :(_reducing_lookup_kernel!(SVector{N,T}, dst, src, indices))
     else
         return quote
             Base.invoke(
@@ -126,12 +168,14 @@ function lookup!(
     A::AbstractEmbeddingTable,
     I::AbstractMatrix{<:Integer},
 )
+    Base.@_inline_meta
     for j in axes(I, 2)
         vO = columnview(O, axes(A, 1), j)
         # First iteration
         col = @inbounds I[1, j]
         vA = columnview(A, col)
         @inbounds for k in axes(A, 1)
+            @_ivdep_meta
             @_interleave_meta(8)
             vO[k] = vA[k]
         end
@@ -141,8 +185,9 @@ function lookup!(
             col = @inbounds I[i, j]
             vA = columnview(A, col)
             @inbounds for k in axes(A, 1)
+                @_ivdep_meta
                 @_interleave_meta(8)
-                vO[k] = vA[k]
+                vO[k] += vA[k]
             end
         end
     end
@@ -162,8 +207,8 @@ struct ColumnWrap{A}
     array::A
 end
 
-_colons(::AbstractArray{T,N}) where {T,N} = ntuple(_ -> :, Val(N - 1))
-_colons(x::ColumnWrap) = _colons(unwrap(x))
+@inline _colons(::AbstractArray{T,N}) where {T,N} = ntuple(_ -> :, Val(N - 1))
+@inline _colons(x::ColumnWrap) = _colons(unwrap(x))
 
 unwrap(x::ColumnWrap) = x.array
 Base.eachindex(x::ColumnWrap) = Base.OneTo(length(x))
@@ -248,13 +293,14 @@ PreallocationStrategy(x::Integer) = PreallocationStrategy{Any}(x)
 _select_eltype(::Type{Any}, ::Type{T}) where {T} = T
 _select_eltype(::Type{U}, ::Type{T}) where {U,T} = U
 
-_batchsize(x::AbstractVector{<:AbstractVector}) = length(first(x))
-_batchsize(x::AbstractMatrix{<:Integer}) = size(x, 1)
-_batchsize(x::AbstractVector{<:AbstractMatrix}) = size(first(x), 2)
+_batchsize(x::AbstractVector{<:AbstractArray}) = _trailing_size(first(x))
+_batchsize(::AbstractVector{<:Integer}) = 1
+_batchsize(x::AbstractArray{<:Integer,N}) where {N} = size(x, N-1)
 _batchsize(x::ColumnWrap) = _batchsize(unwrap(x))
 
 cdiv(a::Integer, b::Integer) = cdiv(promote(a, b)...)
 cdiv(a::T, b::T) where {T<:Integer} = one(T) + div(a - one(T), b)
+viewlast(x::AbstractArray, inds) = view(x, _colons(x)..., inds)
 
 function maplookup(strategy::PreallocationStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
     return maplookup_impl(strategy, x, colwrap(I))
@@ -265,7 +311,7 @@ function maplookup_impl(
     x::Vector{<:AbstractEmbeddingTable{<:Any,T}},
     I,
 ) where {U,T}
-    worksize_div = 4
+    worksize_div = 8
 
     # Preallocate destination.
     ref = ManualMemory.Reference(I)
@@ -305,7 +351,7 @@ function maplookup_impl(
             # Slice along the batch dimension
             v = view(views[i], :, start:stop)
             table = x[i]
-            indices = view(ManualMemory.dereference(ref)[i], start:stop)
+            indices = viewlast(ManualMemory.dereference(ref)[i], start:stop)
 
             # Finally, perform the final lookup
             lookup!(v, table, indices)

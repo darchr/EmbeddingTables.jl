@@ -1,3 +1,107 @@
+#####
+##### Testing `maplookup` and its various flavors.
+#####
+
+@testset "Testing `maplookup`" begin
+    # We need to test "maplookup" for when we supply both vectors of arrays and higher
+    # dimensional arrays.
+    #
+    # For example, non-reducing ensemble lookups can be performed using either a vector
+    # of vectors, or a single matrix.
+    #
+    # Reducing ensemble lookups and be performed with a vector of matrices or a 3d array.
+
+    ncols = 100
+    _nrows = [16, 64, 512]
+    ntables = 10
+    ntests = 100
+    nlookups = 10
+    batchsize = 64
+
+    make_base(nrows) = [randn(Float32, nrows, ncols) for _ in 1:ntables]
+    function make_tables(v::Vector{<:AbstractMatrix}; static = true)
+        return map(v) do matrix
+            if static
+                return SimpleEmbedding{Static{size(matrix,1)}}(matrix)
+            else
+                return SimpleEmbedding{Dynamic}(matrix)
+            end
+        end
+    end
+
+    @testset "Testing Non-Reducing" begin
+        for _ in Base.OneTo(ntests), nrows in _nrows
+            base = make_base(nrows)
+
+            ## Vector of Vectors
+            inds = [rand(1:ncols, batchsize) for _ in 1:ntables]
+            reference = reduce(vcat, map(lookup, base, inds))
+            tables = make_tables(base; static = true)
+
+            # Try the three strategies
+            out_default = maplookup(DefaultStrategy(), tables, inds)
+            @test reduce(vcat, out_default) == reference
+
+            out_parallel = maplookup(SimpleParallelStrategy(), tables, inds)
+            @test reduce(vcat, out_parallel) == reference
+
+            out_preallocated = maplookup(PreallocationStrategy(), tables, inds)
+            @test out_preallocated == reference
+
+            ## Matrix
+            inds = rand(1:ncols, batchsize, ntables)
+            reference = reduce(vcat, map(lookup, base, eachcol(inds)))
+            tables = make_tables(base; static = true)
+
+            # Try the three strategies
+            out_default = maplookup(DefaultStrategy(), tables, inds)
+            @test reduce(vcat, out_default) == reference
+
+            out_parallel = maplookup(SimpleParallelStrategy(), tables, inds)
+            @test reduce(vcat, out_parallel) == reference
+
+            out_preallocated = maplookup(PreallocationStrategy(), tables, inds)
+            @test out_preallocated == reference
+        end
+    end
+
+    @testset "Testing Reducing" begin
+        for _ in Base.OneTo(ntests), nrows in _nrows
+            base = make_base(nrows)
+
+            ## Vector of Matrices
+            inds = [rand(1:ncols, nlookups, batchsize) for _ in 1:ntables]
+            reference = reduce(vcat, map(lookup, base, inds))
+            tables = make_tables(base; static = true)
+
+            # Try the three strategies
+            out_default = maplookup(DefaultStrategy(), tables, inds)
+            @test reduce(vcat, out_default) == reference
+
+            out_parallel = maplookup(SimpleParallelStrategy(), tables, inds)
+            @test reduce(vcat, out_parallel) == reference
+
+            out_preallocated = maplookup(PreallocationStrategy(), tables, inds)
+            @test out_preallocated == reference
+
+            ## 3D Array
+            inds = rand(1:ncols, nlookups, batchsize, ntables)
+            reference = reduce(vcat, map(lookup, base, eachslice(inds; dims = 3)))
+            tables = make_tables(base; static = true)
+
+            # Try the three strategies
+            out_default = maplookup(DefaultStrategy(), tables, inds)
+            @test reduce(vcat, out_default) == reference
+
+            out_parallel = maplookup(SimpleParallelStrategy(), tables, inds)
+            @test reduce(vcat, out_parallel) == reference
+
+            out_preallocated = maplookup(PreallocationStrategy(), tables, inds)
+            @test out_preallocated == reference
+        end
+    end
+end
+
 # We have a problem where lookups mapped across a vector of Embedding Tables doesn't
 # correctly register the gradients.
 #

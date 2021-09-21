@@ -33,7 +33,7 @@ function Flux.Optimise.update!(
     skip_crunch = false,
 )
     if skip_crunch
-        update!(x, xbar, length(xbar.indices), opt.eta)
+        update!(x, xbar, _trailing_size(xbar.indices), opt.eta)
     else
         update!(x, crunch(xbar, translations)..., opt.eta)
     end
