@@ -4,7 +4,8 @@ struct SimpleEmbedding{S,T,A<:AbstractMatrix{T}} <: AbstractEmbeddingTable{S,T}
 
     # -- Inner constructors
     # Have two flavors - one for dynamic sizes, one for static sizes
-    SimpleEmbedding(A::AbstractMatrix{T}) where {T} = new{Dynamic,T,typeof(A)}(A)
+    SimpleEmbedding{Dynamic}(A::AbstractMatrix{T}) where {T} = new{Dynamic,T,typeof(A)}(A)
+    SimpleEmbedding(A::AbstractMatrix) = SimpleEmbedding{Dynamic}(A)
     function SimpleEmbedding{Static{N}}(A::AbstractMatrix{T}) where {N,T}
         if !isa(N, Int)
             msg = """

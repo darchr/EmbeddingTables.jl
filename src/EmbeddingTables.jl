@@ -13,6 +13,14 @@ export DefaultStrategy, SimpleParallelStrategy, PreallocationStrategy, Slicer
 # deps
 import ArrayInterface: ArrayInterface, static, dynamic, StaticInt, One
 import ChainRulesCore: ChainRulesCore, NoTangent
+import Dictionaries:
+    Dictionaries,
+    AbstractDictionary,
+    Dictionary,
+    gettoken!,
+    gettoken,
+    gettokenvalue,
+    settokenvalue!
 import Flux
 import LoopVectorization
 import ManualMemory
@@ -63,16 +71,16 @@ example(x::Vector{<:AbstractEmbeddingTable}) = example(first(x))
 ##### ArrayInterface compat
 #####
 
-ArrayInterface.can_change_size(::Type{<:AbstractEmbeddingTable}) = false
-ArrayInterface.can_setindex(::Type{<:AbstractEmbeddingTable}) = true
-ArrayInterface.contiguous_axis(::Type{<:AbstractEmbeddingTable}) = static(1)
-
-# In general, specific intantiations of embedding tables might not define strides,
-# especially if they are split into multiple subtables.
-ArrayInterface.defines_strides(::Type{<:AbstractEmbeddingTable}) = false
-ArrayInterface.fast_scalar_indexing(::Type{<:AbstractEmbeddingTable}) = false
-ArrayInterface.has_parent(::Type{<:AbstractEmbeddingTable}) = static(false)
-ArrayInterface.is_column_major(::Type{<:AbstractEmbeddingTable}) = static(true)
+# ArrayInterface.can_change_size(::Type{<:AbstractEmbeddingTable}) = false
+# ArrayInterface.can_setindex(::Type{<:AbstractEmbeddingTable}) = true
+# ArrayInterface.contiguous_axis(::Type{<:AbstractEmbeddingTable}) = static(1)
+#
+# # In general, specific intantiations of embedding tables might not define strides,
+# # especially if they are split into multiple subtables.
+# ArrayInterface.defines_strides(::Type{<:AbstractEmbeddingTable}) = false
+# ArrayInterface.fast_scalar_indexing(::Type{<:AbstractEmbeddingTable}) = false
+# ArrayInterface.has_parent(::Type{<:AbstractEmbeddingTable}) = static(false)
+# ArrayInterface.is_column_major(::Type{<:AbstractEmbeddingTable}) = static(true)
 
 # Known sizing
 ArrayInterface.known_size(::Type{<:AbstractEmbeddingTable{Static{N}}}) where {N} =
@@ -99,7 +107,6 @@ function lookup end
 include("misc.jl")
 include("sparseupdate.jl")
 include("lookup.jl")
-include("update.jl")
 
 # Embedding Table struct implementations
 include("simple.jl")

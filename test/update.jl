@@ -2,11 +2,14 @@ non_reducing_update(x...; kw...) = _update_inner(i -> (i,), x...; kw...)
 reducing_update(x...; kw...) = _update_inner(i -> (i, i), x...; kw...)
 
 function _update_inner(
-    f::F, table::AbstractEmbeddingTable, baseline::Matrix; numtests = 10
+    f::F,
+    table::AbstractEmbeddingTable,
+    baseline::Matrix;
+    numtests = 10,
 ) where {F}
     @test size(table) == size(baseline)
     @test length(table) == length(table)
-    nrows, ncols = size(table)
+    ncols = size(table, 2)
 
     opt = Flux.Descent(10.0)
     for _ = 1:numtests
@@ -41,13 +44,6 @@ function _update_inner(
         uncompressed = EmbeddingTables.uncompress(diff_table, size(diff_baseline, 2))
         @test isapprox(diff_baseline, uncompressed)
 
-        # Try crunching and decompressing again, the result should still be the same.
-        diff_table, maxindices = EmbeddingTables.crunch(diff_table)
-        uncompressed = EmbeddingTables.uncompress(
-            diff_table, size(diff_baseline, 2); maxindices = maxindices
-        )
-        @test isapprox(diff_baseline, uncompressed)
-
         # Need to create a new closure because "crunch" effectively destroys the old
         # version of "indices" that gets captured by the original pullback.
         out_ref, back_ref = Zygote._pullback(lookup, baseline, copy(indices_base))
@@ -64,10 +60,6 @@ function _update_inner(
         Flux.Optimise.update!(opt, zeros_table, diff_table)
         @test isapprox(zeros_baseline, zeros_table)
 
-        #####
-        #####
-        #####
-
         # Also try with with the partitioner to ensure that it's logic is correct.
         out_ref, back_ref = Zygote._pullback(lookup, copy(baseline), copy(indices_base))
         out, back = Zygote._pullback(lookup, table, copy(indices_base))
@@ -80,15 +72,6 @@ function _update_inner(
 
         @test isa(zeros_table, AbstractEmbeddingTable)
         Flux.Optimise.update!(opt, zeros_baseline, diff_baseline)
-
-        # Partitioned updates
-        update_batchsize = div(size(diff_table.delta, 2), 10) + 1
-        partitions = EmbeddingTables.UpdatePartitioner(diff_table, update_batchsize)
-        for subtable in partitions
-            Flux.Optimise.update!(opt, zeros_table, subtable)
-        end
-
-        @test isapprox(zeros_baseline, zeros_table)
     end
 end
 
@@ -96,91 +79,73 @@ end
 ##### Tests
 #####
 
-findcols(v, x::AbstractVector) = findall(isequal(v), x)
-function findcols(v, x::AbstractMatrix)
-    r = Int[]
-    for (i, col) in enumerate(eachcol(x))
-        for _ in Base.OneTo(count(isequal(v), col))
-            push!(r, i)
-        end
+@testset "Testing Update Partitions" begin
+    batchsize = 512
+    base = randn(Float32, 16, 100)
+    featuresize = size(base, 1)
+    A = SimpleEmbedding{Static{featuresize}}(copy(base))
+    delta = randn(Float32, featuresize, batchsize)
+    inds = rand(1:size(base, 2), batchsize)
+
+    grad = EmbeddingTables.SparseEmbeddingUpdate{Static{featuresize}}(delta, inds)
+    indexer = EmbeddingTables.Indexer()
+    EmbeddingTables.index!(indexer, grad.indices)
+
+    # Do the reference update
+    EmbeddingTables.update!(A, grad, indexer, Float32(1.0))
+
+    # Now, do a partitioned update.
+    B = SimpleEmbedding{Static{featuresize}}(copy(base))
+    num_splits = 4
+    for this_split in Base.OneTo(num_splits)
+        EmbeddingTables.update!(
+            B,
+            grad,
+            EmbeddingTables.IndexerView(indexer, num_splits, this_split),
+            Float32(1.0),
+        )
     end
-    return r
-end
-
-@testset "Testing Crunch" begin
-    ### Single Lookup Case
-    delta = rand(Float32, 16, 5)
-    delta_old = copy(delta)
-
-    old_indices = [4, 1, 4, 2, 1]
-    indices = copy(old_indices)
-    # Idiot check
-    @test length(indices) == size(delta, 2)
-
-    update_old = SparseEmbeddingUpdate{Static{size(delta, 1)}}(delta, indices)
-    update, newlength = EmbeddingTables.crunch(update_old)
-    # Single lookup update should return the same underlying object.
-    # Ensure this invariant.
-    @test update === update_old
-
-    @test newlength == length(unique(indices))
-    @test view(update.indices, 1:newlength) == unique(indices)
-    @test view(delta, :, 1) == delta_old[:, 1] + delta_old[:, 3]
-    @test view(delta, :, 2) == delta_old[:, 2] + delta_old[:, 5]
-    @test view(delta, :, 3) == delta_old[:, 4]
-
-    for i in 1:newlength
-        expected = sum(getindex.(Ref(delta_old), :, findcols(update.indices[i], old_indices)))
-        @test view(delta, :, i) == expected
-    end
-
-    # ### Multiple Lookup Case
-    # delta = rand(Float32, 16, 5)
-    # delta_old = copy(delta)
-
-    # old_indices = [
-    #     4 1 4 2 1;
-    #     5 1 3 3 2;
-    # ]
-    # indices = copy(old_indices)
-
-    # update_old = SparseEmbeddingUpdate{Static{size(delta, 1)}}(delta, indices)
-    # update, newlength = EmbeddingTables.crunch(update_old)
-
-    # # By necessity, a different object should be returned.
-    # @test update !== update_old
-    # @test newlength == length(unique(indices))
-    # @test view(update.indices, 1:newlength) == unique(indices)
-    # delta = update.delta
-
-    # for i in 1:newlength
-    #     expected = sum(getindex.(Ref(delta_old), :, findcols(update.indices[i], old_indices)))
-    #     @test view(delta, :, i) == expected
-    # end
+    @test A == B
 end
 
 @testset "Testing Update" begin
-    nrows = [64, 80, 128]
+    nrows = [64, 80, 512]
     ncols = 100
     numtests = 10
 
     @testset "Simple Nonreducing" begin
         for rows in nrows
-            # Static
+            println("Static Nonreducing: ", rows)
             base = randn(Float32, rows, ncols)
             A = SimpleEmbedding{Static{rows}}(copy(base))
             B = copy(base)
-            non_reducing_update(A, B; numtests = numtests)
+            @time non_reducing_update(A, B; numtests = numtests)
+        end
+
+        for rows in nrows
+            println("Dynamic Nonreducing: ", rows)
+            base = randn(Float32, rows, ncols)
+            A = SimpleEmbedding{Dynamic}(copy(base))
+            B = copy(base)
+            @time non_reducing_update(A, B; numtests = numtests)
         end
     end
 
     @testset "Simple Reducing" begin
         for rows in nrows
-            # Static
+            println("Static Reducing: ", rows)
             base = randn(Float32, rows, ncols)
             A = SimpleEmbedding{Static{rows}}(copy(base))
             B = copy(base)
-            reducing_update(A, B; numtests = numtests)
+            @time reducing_update(A, B; numtests = numtests)
+        end
+
+        for rows in nrows
+            println("Dynamic Reducing: ", rows)
+            base = randn(Float32, rows, ncols)
+            A = SimpleEmbedding{Dynamic}(copy(base))
+            B = copy(base)
+            @time reducing_update(A, B; numtests = numtests)
         end
     end
 end
