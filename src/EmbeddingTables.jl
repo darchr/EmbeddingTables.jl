@@ -2,10 +2,11 @@ module EmbeddingTables
 
 # types
 export AbstractEmbeddingTable, SimpleEmbedding, SplitEmbedding
-export SparseEmbeddingUpdate, UpdatePartitioner, Static, Dynamic
+export SparseEmbeddingUpdate, Static, Dynamic
+export IndexingContext, Forward, Update
 
 # functions
-export lookup, maplookup
+export lookup, maplookup, featuresize
 
 # strategies
 export DefaultStrategy, SimpleParallelStrategy, PreallocationStrategy, Slicer
@@ -26,7 +27,6 @@ import LoopVectorization
 import ManualMemory
 import Polyester
 import StaticArrays: StaticArrays, SVector
-import UnPack: @unpack
 
 # Execution strategies describe how to perform `maplookup` across an ensemble of embedding
 # tables.
@@ -57,14 +57,30 @@ abstract type AbstractEmbeddingTable{S<:AbstractLookupType,T} <: AbstractArray{T
 Base.IndexStyle(::AbstractEmbeddingTable) = Base.IndexLinear()
 
 featuresize(A::AbstractMatrix) = size(A, 1)
+featuresize(::AbstractEmbeddingTable{Static{N}}) where {N} = static(N)
+
+abstract type IndexingContext end
+struct Forward <: IndexingContext end
+struct Update <: IndexingContext end
+
+function columnpointer(A::AbstractMatrix, i::Integer, ::IndexingContext)
+    Base.@_inline_meta
+    return columnpointer(A, i)
+end
 Base.@propagate_inbounds function columnpointer(A::AbstractMatrix{T}, i::Integer) where {T}
     return pointer(A) + strides(A)[2] * sizeof(T) * (i - 1)
 end
 
-@inline columnview(A::AbstractMatrix, i::Integer) = columnview(A, axes(A, static(1)), i)
 @inline columnview(A::AbstractMatrix, slice, i::Integer) = Base.unsafe_view(A, slice, i)
+@inline columnview(A::AbstractMatrix, i::Integer) = columnview(A, axes(A, 1), i)
+@inline columnview(A::AbstractMatrix, slice, i::Integer, ::IndexingContext) =
+    columnview(A, slice, i)
+@inline columnview(A::AbstractMatrix, i::Integer, ::IndexingContext) =
+    columnview(A, i)
+
 columnview(A::AbstractEmbeddingTable, _, ::Integer) =
     throw(ArgumentError("Please explicitly define `columnview` for $(typeof(A))"))
+
 example(x::Vector{<:AbstractEmbeddingTable}) = example(first(x))
 
 #####

@@ -40,8 +40,8 @@ end
 # Generic fallback case
 function lookup!(dst, src::AbstractEmbeddingTable, indices::AbstractVector{<:Integer})
     for (dst_col, src_col) in enumerate(indices)
-        @inbounds src_view = columnview(src, src_col)
-        @inbounds dst_view = columnview(dst, dst_col)
+        @inbounds src_view = columnview(src, src_col, Forward())
+        @inbounds dst_view = columnview(dst, dst_col, Forward())
 
         @inbounds for i in ArrayInterface.axes(src, static(1))
             @_ivdep_meta
@@ -62,8 +62,8 @@ function _lookup_kernel!(
     @inbounds for dst_col in axes(dst, 2)
         @_ivdep_meta
         src_col = indices[dst_col]
-        src_ptr = convert(Ptr{SVector{N,T}}, columnpointer(src, src_col))
-        dst_ptr = convert(Ptr{SVector{N,T}}, columnpointer(dst, dst_col))
+        src_ptr = convert(Ptr{SVector{N,T}}, columnpointer(src, src_col, Forward()))
+        dst_ptr = convert(Ptr{SVector{N,T}}, columnpointer(dst, dst_col, Forward()))
         unsafe_store!(dst_ptr, unsafe_load(src_ptr))
     end
     return nothing
@@ -106,12 +106,12 @@ function _reducing_lookup_kernel(
     Base.@_inline_meta
     col = @inbounds indices[1]
     # Move the first element into registers
-    ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col))
+    ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col, Forward()))
     accumulator = unsafe_load(ptr)
     for i = 2:(lastindex(indices))
         @_ivdep_meta
         col = @inbounds indices[i]
-        ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col))
+        ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col, Forward()))
         accumulator += unsafe_load(ptr)
     end
     return accumulator
@@ -130,7 +130,7 @@ function _reducing_lookup_kernel!(
             src,
             Base.unsafe_view(indices, axes(indices, static(1)), dst_col),
         )
-        dst_ptr = Ptr{SVector{N,T}}(columnpointer(dst, dst_col))
+        dst_ptr = Ptr{SVector{N,T}}(columnpointer(dst, dst_col, Forward()))
         unsafe_store!(dst_ptr, accumulator)
     end
     return nothing
@@ -168,12 +168,12 @@ function lookup!(
     A::AbstractEmbeddingTable,
     I::AbstractMatrix{<:Integer},
 )
-    Base.@_inline_meta
+    #Base.@_inline_meta
     for j in axes(I, 2)
-        vO = columnview(O, axes(A, 1), j)
+        vO = columnview(O, axes(A, 1), j, Forward())
         # First iteration
         col = @inbounds I[1, j]
-        vA = columnview(A, col)
+        vA = columnview(A, col, Forward())
         @inbounds for k in axes(A, 1)
             @_ivdep_meta
             @_interleave_meta(8)
@@ -183,7 +183,7 @@ function lookup!(
         # Accumulate all other times.
         for i in 2:size(I, 1)
             col = @inbounds I[i, j]
-            vA = columnview(A, col)
+            vA = columnview(A, col, Forward())
             @inbounds for k in axes(A, 1)
                 @_ivdep_meta
                 @_interleave_meta(8)
@@ -239,6 +239,9 @@ function maplookup_impl(_::DefaultStrategy, x::Vector{<:AbstractEmbeddingTable},
 end
 
 # Generic pullback
+# Inform `ChainRulesCore` that `SparseEmbeddingUpdates` are suitable differentials for
+# `AbstractArray`s.
+(p::ChainRulesCore.ProjectTo{AbstractArray, <:NamedTuple})(x::SparseEmbeddingUpdate) = x
 function ChainRulesCore.rrule(
     ::typeof(maplookup_impl),
     strategy::AbstractExecutionStrategy,
@@ -335,6 +338,7 @@ function maplookup_impl(
 
     # Implement the poor man's dynamic load balancing.
     len = worksize_div * length(x)
+    divisor = length(x)
     count = Threads.Atomic{Int}(1)
     Polyester.@batch (per = core) for _ in Base.OneTo(Threads.nthreads())
         while true
@@ -342,7 +346,10 @@ function maplookup_impl(
             k > len && break
 
             # Convert this in to a big and little index
-            i, j = _divrem_index(k, worksize_div)
+            # Parallelize first across tables, then within a table.
+            # This can reduce the number of threads working on a single table, which
+            # can be helpful is synchronization is required.
+            j, i = _divrem_index(k, divisor)
 
             # Compute the start and the stop indices along the batch dimension.
             start = (j - 1) * worksize + 1

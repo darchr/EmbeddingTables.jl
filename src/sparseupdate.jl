@@ -73,7 +73,7 @@ function _update_generic_impl!(
         i = start
         while i <= stop
             col = map[i]
-            cv = columnview(grads, axes(table, static(1)), col)
+            cv = columnview(grads, axes(table, static(1)), col, Update())
             @inbounds for i in axes(table, static(1))
                 @_ivdep_meta
                 @_interleave_meta(8)
@@ -82,7 +82,7 @@ function _update_generic_impl!(
             i += 1
         end
 
-        tableview = columnview(table, k)
+        tableview = columnview(table, k, Update())
         f(x, y) = x - alpha * y
         LoopVectorization.vmapnt!(f, tableview, tableview, scratchspace)
     end
@@ -106,12 +106,12 @@ function _update_specialized_impl!(
         i = start
         while i <= stop
             col = map[i]
-            accum += unsafe_load(Ptr{SVector{N,T}}(columnpointer(grads, col)))
+            accum += unsafe_load(Ptr{SVector{N,T}}(columnpointer(grads, col, Update())))
             i += 1
         end
 
         # Done accumulating - time to write back out update.
-        tableview = columnview(table, k)
+        tableview = columnview(table, k, Update())
         f(x, y) = x - alpha * y
         LoopVectorization.vmapnt!(f, tableview, tableview, accum)
     end

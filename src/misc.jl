@@ -88,6 +88,7 @@ function histogram!(d::AbstractDictionary, A::AbstractArray)
     shallow_empty!(d)
     return unsafe_histogram!(d, A)
 end
+
 function unsafe_histogram!(d::AbstractDictionary, A::AbstractArray)
     Base.@_inline_meta
     order = 1
@@ -142,7 +143,7 @@ function Base.empty!(I::Indexer)
     return I
 end
 
-function accumulate!(I::Indexer)
+function prefixsum!(I::Indexer)
     cumulative, histogram = I.cumulative, I.histogram
     resize!(cumulative, length(histogram) + 1)
     next_offset = 1
@@ -173,7 +174,7 @@ function index!(I::Indexer, A::AbstractArray)
 
     # Step 2 - convert the histogram into the `cumulative` array that records the
     # cumulative sum of offsets
-    cumulative = accumulate!(I)
+    cumulative = prefixsum!(I)
 
     # Step 3 (final pass) - Record the actual locations of columns in the update.
     map = I.map

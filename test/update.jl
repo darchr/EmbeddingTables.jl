@@ -1,5 +1,5 @@
 non_reducing_update(x...; kw...) = _update_inner(i -> (i,), x...; kw...)
-reducing_update(x...; kw...) = _update_inner(i -> (i, i), x...; kw...)
+reducing_update(x...; kw...) = _update_inner(i -> (10, i), x...; kw...)
 
 function _update_inner(
     f::F,
@@ -12,7 +12,7 @@ function _update_inner(
     ncols = size(table, 2)
 
     opt = Flux.Descent(10.0)
-    for _ = 1:numtests
+    for _ in 1:numtests
         # Generate random lookup indices which may include repeats.
         indices_base = rand(1:ncols, f(ncols)...)
         indices = copy(indices_base)
@@ -109,7 +109,7 @@ end
 end
 
 @testset "Testing Update" begin
-    nrows = [64, 80, 512]
+    nrows = [64, 80, 256]
     ncols = 100
     numtests = 10
 
