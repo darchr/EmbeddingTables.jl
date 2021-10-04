@@ -22,8 +22,8 @@ function uncompress(
     dst = zeros(eltype(delta), size(delta, 1), dstcols)
     count = 0
     for (column, update) in enumerate(eachcol(delta))
-        for c in _maybe_columnview(indices, column)
-            columnview(dst, c) .+= update
+        for c in _maybe_columnview(indices, column, Update())
+            columnview(dst, c, Update()) .+= update
         end
         count += 1
         count == maxindices && break
@@ -73,7 +73,7 @@ function _update_generic_impl!(
         i = start
         while i <= stop
             col = map[i]
-            cv = columnview(grads, axes(table, static(1)), col, Update())
+            cv = columnview(grads, featuresize(table), col, Update())
             @inbounds for i in axes(table, static(1))
                 @_ivdep_meta
                 @_interleave_meta(8)

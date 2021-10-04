@@ -39,16 +39,18 @@ end
 
 # Implement Array Interface
 Base.size(A::SimpleEmbedding) = size(A.data)
-#Base.size(A::SimpleEmbedding) = size(A.data)
-Base.@propagate_inbounds Base.getindex(A::SimpleEmbedding, i::Int) = A.data[i]
-Base.@propagate_inbounds Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)
+Base.IndexStyle(::SimpleEmbedding) = Base.IndexLinear()
+@inline Base.getindex(A::SimpleEmbedding, i::Int) = A.data[i]
+@inline Base.setindex!(A::SimpleEmbedding, v, i::Int) = (A.data[i] = v)
 
 #####
 ##### EmbeddingTable Interface
 #####
 
-Base.pointer(A::SimpleEmbedding) = pointer(A.data)
+@inline Base.pointer(A::SimpleEmbedding) = pointer(A.data)
 columnpointer(A::SimpleEmbedding, i::Integer) = columnpointer(A.data, i)
-columnview(A::SimpleEmbedding, i::Integer) = columnview(A.data, i)
+function columnpointer(A::SimpleEmbedding{Static{N},T}, i::Integer) where {N,T}
+    return pointer(A.data) + (i - 1) * N * sizeof(T)
+end
 example(A::SimpleEmbedding) = A.data
 

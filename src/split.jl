@@ -73,19 +73,19 @@ function Base.size(A::SplitEmbedding)
     return (nrows, ncols)
 end
 
-function Base.getindex(A::SplitEmbedding, i::Int)
-    @boundscheck checkbounds(A, i)
-    # Find which chunk the data is in, then lookup that chunk
-    chunk, index = chunkindex(A, i)
-    return @inbounds(A.data[chunk][index])
-end
+# function Base.getindex(A::SplitEmbedding, i::Int)
+#     @boundscheck checkbounds(A, i)
+#     # Find which chunk the data is in, then lookup that chunk
+#     chunk, index = chunkindex(A, i)
+#     return @inbounds(A.data[chunk][index])
+# end
 
-function Base.setindex!(A::SplitEmbedding, v, i::Int)
-    @boundscheck checkbounds(A, i)
-    # Find which chunk the data is in, then lookup that chunk
-    chunk, index = chunkindex(A, i)
-    return @inbounds(A.data[chunk][index] = v)
-end
+# function Base.setindex!(A::SplitEmbedding, v, i::Int)
+#     @boundscheck checkbounds(A, i)
+#     # Find which chunk the data is in, then lookup that chunk
+#     chunk, index = chunkindex(A, i)
+#     return @inbounds(A.data[chunk][index] = v)
+# end
 
 #####
 ##### EmbeddingTables Interface
@@ -97,13 +97,5 @@ Base.@propagate_inbounds function columnpointer(A::SplitEmbedding, i::Integer)
     @boundscheck checkbounds(A.data, chunk)
     data = @inbounds A.data[chunk]
     return columnpointer(data, col)
-end
-
-# Return a column view of some underlying chunk
-Base.@propagate_inbounds @inline function columnview(A::SplitEmbedding, i::Integer)
-    chunk, col = _divrem_index(i, _shardsize(A))
-    @boundscheck checkbounds(A.data, chunk)
-    data = @inbounds A.data[chunk]
-    return columnview(data, axes(A,1), col)
 end
 

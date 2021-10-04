@@ -81,8 +81,8 @@ end
 Base.length(x::ColumnIter) = length(x.iter)
 Base.eltype(::Type{ColumnIter{A}}) where {T, A <: AbstractMatrix{T}} = Tuple{Int,T}
 
-_maybe_columnview(x::AbstractVector, i) = (x[i],)
-_maybe_columnview(x::AbstractMatrix, i) = columnview(x, i)
+_maybe_columnview(x::AbstractVector, i, ::IndexingContext) = (x[i],)
+_maybe_columnview(x::AbstractMatrix, i, ctx::IndexingContext) = columnview(x, i, ctx)
 
 function histogram!(d::AbstractDictionary, A::AbstractArray)
     shallow_empty!(d)

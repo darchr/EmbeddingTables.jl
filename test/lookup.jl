@@ -72,13 +72,17 @@ end
             base = rand(Float32, rows, ncols)
 
             # Dynamic
-            table = SimpleEmbedding(copy(base))
+            table = SimpleEmbedding(similar(base))
+            table .= base
             baseline = copy(base)
+            @test table == baseline
             non_reducing_lookup(table, baseline)
 
             # Static Sized
-            table = SimpleEmbedding{Static{rows}}(copy(base))
+            table = SimpleEmbedding{Static{rows}}(similar(base))
+            table .= base
             baseline = copy(base)
+            @test table == baseline
             non_reducing_lookup(table, baseline)
         end
     end
@@ -88,13 +92,17 @@ end
             base = rand(Float32, rows, ncols)
 
             # Dynamic
-            table = SimpleEmbedding(copy(base))
+            table = SimpleEmbedding(similar(base))
+            table .= base
             baseline = copy(base)
+            @test table == baseline
             reducing_lookup(table, baseline)
 
             # Static Sized
-            table = SimpleEmbedding{Static{rows}}(copy(base))
+            table = SimpleEmbedding{Static{rows}}(similar(base))
+            table .= base
             baseline = copy(base)
+            @test table == baseline
             reducing_lookup(table, baseline)
         end
     end
@@ -105,8 +113,10 @@ end
             base = rand(Float32, rows, ncols)
 
             for cols_per_chunk in chunk_sizes
-                table = SplitEmbedding(copy(base), cols_per_chunk)
+                table = SplitEmbedding(similar(base), cols_per_chunk)
+                table .= base
                 baseline = copy(base)
+                @test table == baseline
                 non_reducing_lookup(table, baseline)
             end
         end
@@ -118,8 +128,10 @@ end
             base = rand(Float32, rows, ncols)
 
             for cols_per_chunk in chunk_sizes
-                table = SplitEmbedding(copy(base), cols_per_chunk)
+                table = SplitEmbedding(similar(base), cols_per_chunk)
+                table .= base
                 baseline = copy(base)
+                @test table == baseline
                 reducing_lookup(table, baseline)
             end
         end

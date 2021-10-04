@@ -12,7 +12,7 @@ export lookup, maplookup, featuresize
 export DefaultStrategy, SimpleParallelStrategy, PreallocationStrategy, Slicer
 
 # deps
-import ArrayInterface: ArrayInterface, static, dynamic, StaticInt, One
+import ArrayInterface: ArrayInterface
 import ChainRulesCore: ChainRulesCore, NoTangent
 import Dictionaries:
     Dictionaries,
@@ -27,6 +27,8 @@ import LoopVectorization
 import ManualMemory
 import Polyester
 import StaticArrays: StaticArrays, SVector
+import Static: One, static, dynamic, StaticInt
+import StrideArraysCore
 
 # Execution strategies describe how to perform `maplookup` across an ensemble of embedding
 # tables.
@@ -54,49 +56,60 @@ Static(N) = Static{N}()
 abstract type AbstractEmbeddingTable{S<:AbstractLookupType,T} <: AbstractArray{T,2} end
 
 # Some generic interface implementations for AbstractEmbeddingTables
-Base.IndexStyle(::AbstractEmbeddingTable) = Base.IndexLinear()
+Base.IndexStyle(::AbstractEmbeddingTable) = Base.IndexCartesian()
 
 featuresize(A::AbstractMatrix) = size(A, 1)
 featuresize(::AbstractEmbeddingTable{Static{N}}) where {N} = static(N)
 
 abstract type IndexingContext end
+struct NoContext <: IndexingContext end
 struct Forward <: IndexingContext end
 struct Update <: IndexingContext end
 
+#####
+##### columnpointer
+#####
+
+Base.@propagate_inbounds function columnpointer(A::AbstractMatrix{T}, i::Integer) where {T}
+    return pointer(A) + strides(A)[2] * sizeof(T) * (i - 1)
+end
+columnpointer(A::AbstractEmbeddingTable, _::Integer) =
+    throw(ArgumentError("Please explicitly define `columnpointer` for $(typeof(A))"))
+
+# Implicitly remove "IndexingContext"
 function columnpointer(A::AbstractMatrix, i::Integer, ::IndexingContext)
     Base.@_inline_meta
     return columnpointer(A, i)
 end
-Base.@propagate_inbounds function columnpointer(A::AbstractMatrix{T}, i::Integer) where {T}
-    return pointer(A) + strides(A)[2] * sizeof(T) * (i - 1)
-end
 
-@inline columnview(A::AbstractMatrix, slice, i::Integer) = Base.unsafe_view(A, slice, i)
-@inline columnview(A::AbstractMatrix, i::Integer) = columnview(A, axes(A, 1), i)
-@inline columnview(A::AbstractMatrix, slice, i::Integer, ::IndexingContext) =
-    columnview(A, slice, i)
-@inline columnview(A::AbstractMatrix, i::Integer, ::IndexingContext) =
-    columnview(A, i)
+#####
+##### ColumnView
+#####
 
-columnview(A::AbstractEmbeddingTable, _, ::Integer) =
-    throw(ArgumentError("Please explicitly define `columnview` for $(typeof(A))"))
+oneto(x::Integer) = Base.OneTo(x)
+oneto(x::StaticInt) = One():x
+
+# Bottom level `columnview`
+@inline columnview(A::AbstractEmbeddingTable, len, i::Integer, ctx::IndexingContext) =
+    StrideArraysCore.PtrArray(columnpointer(A, i, ctx), (len,))
+
+@inline columnview(A::AbstractMatrix, len, i::Integer) = Base.unsafe_view(A, oneto(len), i)
+
+@inline columnview(A::AbstractMatrix, len, i::Integer, _::IndexingContext) =
+    columnview(A, len, i)
+
+@inline columnview(A::AbstractMatrix, i::Integer, ctx::IndexingContext = NoContext()) =
+    columnview(A, featuresize(A), i, ctx)
+
+#####
+##### example
+#####
 
 example(x::Vector{<:AbstractEmbeddingTable}) = example(first(x))
 
 #####
 ##### ArrayInterface compat
 #####
-
-# ArrayInterface.can_change_size(::Type{<:AbstractEmbeddingTable}) = false
-# ArrayInterface.can_setindex(::Type{<:AbstractEmbeddingTable}) = true
-# ArrayInterface.contiguous_axis(::Type{<:AbstractEmbeddingTable}) = static(1)
-#
-# # In general, specific intantiations of embedding tables might not define strides,
-# # especially if they are split into multiple subtables.
-# ArrayInterface.defines_strides(::Type{<:AbstractEmbeddingTable}) = false
-# ArrayInterface.fast_scalar_indexing(::Type{<:AbstractEmbeddingTable}) = false
-# ArrayInterface.has_parent(::Type{<:AbstractEmbeddingTable}) = static(false)
-# ArrayInterface.is_column_major(::Type{<:AbstractEmbeddingTable}) = static(true)
 
 # Known sizing
 ArrayInterface.known_size(::Type{<:AbstractEmbeddingTable{Static{N}}}) where {N} =
@@ -115,12 +128,32 @@ function ArrayInterface.size(A::AbstractEmbeddingTable{Static{N}}) where {N}
 end
 
 #####
+##### AbstractArray Interface
+#####
+
+Base.@propagate_inbounds function Base.getindex(A::AbstractEmbeddingTable, I::Vararg{Int,2})
+    @boundscheck checkbounds(A, I...)
+    return unsafe_load(columnpointer(A, I[2], NoContext()), I[1])
+end
+
+Base.@propagate_inbounds function Base.setindex!(
+    A::AbstractEmbeddingTable,
+    v,
+    I::Vararg{Int,2},
+)
+    @boundscheck checkbounds(A, I...)
+    return unsafe_store!(columnpointer(A, I[2], NoContext()), v, I[1])
+end
+
+#####
 ##### Implementation
 #####
 
-# Interface
+# utils
+include("utils.jl")
+
+# interface
 function lookup end
-include("misc.jl")
 include("sparseupdate.jl")
 include("lookup.jl")
 

@@ -168,9 +168,8 @@ function lookup!(
     A::AbstractEmbeddingTable,
     I::AbstractMatrix{<:Integer},
 )
-    #Base.@_inline_meta
     for j in axes(I, 2)
-        vO = columnview(O, axes(A, 1), j, Forward())
+        vO = columnview(O, featuresize(A), j, Forward())
         # First iteration
         col = @inbounds I[1, j]
         vA = columnview(A, col, Forward())
@@ -268,8 +267,6 @@ function maplookup_impl(_::SimpleParallelStrategy, x::Vector{<:AbstractEmbedding
     # Need to capture this as a `ManualMemory.reference` to keep ManualMemory
     # from exploding while trying to store all the cached array stuff.
     ref = ManualMemory.Reference(I)
-
-    # Note - this is a hack to get around Polyester doing something weird!
     Polyester.@batch (per = core) for i in eachindex(x)
         out[i] = lookup(x[i], ManualMemory.dereference(ref)[i])
     end
@@ -282,8 +279,6 @@ end
 #
 # This may involve preallocating some space in the first few rows of the destination
 # array to make space for inserting the result of the bottom MLP.
-#
-# TODO: Can we make the threading a little more finegrained for better threading?
 struct PreallocationStrategy{T} <: AbstractExecutionStrategy
     # Allow for extra rows to be placed at the beginning of the destination to allow
     # the results of dense computation to be inserted inplace.
