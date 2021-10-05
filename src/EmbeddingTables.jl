@@ -3,7 +3,7 @@ module EmbeddingTables
 # types
 export AbstractEmbeddingTable, SimpleEmbedding, SplitEmbedding
 export SparseEmbeddingUpdate, Static, Dynamic
-export IndexingContext, Forward, Update
+export IndexingContext, NoContext, Forward, Update
 
 # functions
 export lookup, maplookup, featuresize

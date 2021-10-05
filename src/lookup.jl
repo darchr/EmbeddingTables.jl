@@ -43,7 +43,7 @@ function lookup!(dst, src::AbstractEmbeddingTable, indices::AbstractVector{<:Int
         @inbounds src_view = columnview(src, src_col, Forward())
         @inbounds dst_view = columnview(dst, dst_col, Forward())
 
-        @inbounds for i in ArrayInterface.axes(src, static(1))
+        @inbounds for i in axes(src, static(1))
             @_ivdep_meta
             @_interleave_meta(8)
             dst_view[i] = src_view[i]
@@ -59,7 +59,7 @@ function _lookup_kernel!(
     indices::AbstractVector{<:Integer},
 ) where {N,T}
     Base.@_inline_meta
-    @inbounds for dst_col in axes(dst, 2)
+    @inbounds for dst_col in axes(dst, static(2))
         @_ivdep_meta
         src_col = indices[dst_col]
         src_ptr = convert(Ptr{SVector{N,T}}, columnpointer(src, src_col, Forward()))
@@ -233,7 +233,7 @@ function maplookup(strategy::DefaultStrategy, x::Vector{<:AbstractEmbeddingTable
     return maplookup_impl(strategy, x, colwrap(I))
 end
 
-function maplookup_impl(_::DefaultStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
+function maplookup_impl(::DefaultStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
     return map(lookup, x, colwrap(I))
 end
 
@@ -262,7 +262,7 @@ function maplookup(strategy::SimpleParallelStrategy, x::Vector{<:AbstractEmbeddi
 end
 
 function maplookup_impl(_::SimpleParallelStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
-    out = Vector{typeof(example(x[1]))}(undef, length(x))
+    out = Vector{typeof(example(x))}(undef, length(x))
 
     # Need to capture this as a `ManualMemory.reference` to keep ManualMemory
     # from exploding while trying to store all the cached array stuff.
@@ -301,6 +301,7 @@ cdiv(a::T, b::T) where {T<:Integer} = one(T) + div(a - one(T), b)
 viewlast(x::AbstractArray, inds) = view(x, _colons(x)..., inds)
 
 function maplookup(strategy::PreallocationStrategy, x::Vector{<:AbstractEmbeddingTable}, I)
+    Base.@_inline_meta
     return maplookup_impl(strategy, x, colwrap(I))
 end
 

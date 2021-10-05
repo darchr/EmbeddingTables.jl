@@ -66,26 +66,12 @@ end
 
 @inline chunkindex(A::SplitEmbedding, i::Int) = _divrem_index(i, prod(A.matrixsize))
 
-# Interface
+# AbstractArray requirements
 function Base.size(A::SplitEmbedding)
     nrows = A.matrixsize[1]
     ncols = A.matrixsize[2] * (length(A.data) - 1) + size(last(A.data), 2)
     return (nrows, ncols)
 end
-
-# function Base.getindex(A::SplitEmbedding, i::Int)
-#     @boundscheck checkbounds(A, i)
-#     # Find which chunk the data is in, then lookup that chunk
-#     chunk, index = chunkindex(A, i)
-#     return @inbounds(A.data[chunk][index])
-# end
-
-# function Base.setindex!(A::SplitEmbedding, v, i::Int)
-#     @boundscheck checkbounds(A, i)
-#     # Find which chunk the data is in, then lookup that chunk
-#     chunk, index = chunkindex(A, i)
-#     return @inbounds(A.data[chunk][index] = v)
-# end
 
 #####
 ##### EmbeddingTables Interface
