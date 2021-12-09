@@ -88,6 +88,7 @@ function _update_generic_impl!(
     end
 end
 
+
 function _update_specialized_impl!(
     table::AbstractEmbeddingTable{Static{N},T},
     update::SparseEmbeddingUpdate{Static{N}},
