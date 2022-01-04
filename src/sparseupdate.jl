@@ -53,6 +53,14 @@ function update!(
     return _update_generic_impl!(table, update, indexer, alpha; kw...)
 end
 
+# LoopVectorization seems to have a hard time optimizing closures (i.e., using `vmapnt!`
+# for a closure capturing the `alpha` parameter for SGD).
+# Here, we use an explicit struct to try and help out LoopVectorization's codegen.
+struct AlphaCapture{T}
+    alpha::T
+end
+(f::AlphaCapture)(x, y) = x - (f.alpha) * y
+
 function _update_generic_impl!(
     table::AbstractEmbeddingTable{S,T},
     update::SparseEmbeddingUpdate{S},
@@ -83,11 +91,12 @@ function _update_generic_impl!(
         end
 
         tableview = columnview(table, k, Update())
-        f(x, y) = x - alpha * y
-        LoopVectorization.vmapnt!(f, tableview, tableview, scratchspace)
+        #f(x, y) = x - alpha * y
+        LoopVectorization.vmap!(AlphaCapture(alpha), tableview, tableview, scratchspace)
+        #LoopVectorization.vmapnt!(f, tableview, tableview, scratchspace)
+        #LoopVectorization.vmap!(f, tableview, tableview, scratchspace)
     end
 end
-
 
 function _update_specialized_impl!(
     table::AbstractEmbeddingTable{Static{N},T},
@@ -112,9 +121,27 @@ function _update_specialized_impl!(
         end
 
         # Done accumulating - time to write back out update.
+        #
+        # Need to manually specifiy that the pointer address for `accum` is stable because
+        # LoopVectorization's automatic treatment doesn't preserve a pointer to `accum`
+        # correctly.
+        #
+        # Julia is able to elide the creation of the `Ref` altogether.
         tableview = columnview(table, k, Update())
-        f(x, y) = x - alpha * y
-        LoopVectorization.vmapnt!(f, tableview, tableview, accum)
+        ref = Ref(accum)
+        GC.@preserve ref begin
+            ptrarray = StrideArraysCore.PtrArray(
+                Base.unsafe_convert(Ptr{T}, ref),
+                (static(N),),
+            )
+
+            LoopVectorization.vmapnt!(
+                (x,y) -> x - alpha * y,
+                tableview,
+                tableview,
+                ptrarray,
+            )
+        end
     end
 end
 

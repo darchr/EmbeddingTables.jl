@@ -27,7 +27,7 @@ import LoopVectorization
 import ManualMemory
 import Polyester
 import SIMD
-import StaticArrays: StaticArrays, SVector
+import StaticArrays: StaticArrays, SVector, MVector
 import Static: One, static, dynamic, StaticInt
 import StrideArraysCore
 
@@ -152,7 +152,6 @@ end
 
 # utils
 include("utils.jl")
-include("codegen.jl")
 
 # interface
 function lookup end
