@@ -144,7 +144,7 @@ function Base.empty!(I::Indexer)
 end
 
 function prefixsum!(I::Indexer)
-    cumulative, histogram = I.cumulative, I.histogram
+    (; cumulative, histogram) = I
     resize!(cumulative, length(histogram) + 1)
     next_offset = 1
 
@@ -169,7 +169,7 @@ function index!(I::Indexer, A::AbstractArray)
     empty!(I)
 
     # Step 1 - create a histogram of values in the array.
-    histogram = I.histogram
+    (; histogram) = I
     unsafe_histogram!(histogram, A)
 
     # Step 2 - convert the histogram into the `cumulative` array that records the
@@ -177,7 +177,7 @@ function index!(I::Indexer, A::AbstractArray)
     cumulative = prefixsum!(I)
 
     # Step 3 (final pass) - Record the actual locations of columns in the update.
-    map = I.map
+    (; map) = I
     resize!(map, length(A))
     @inbounds for (column, x) in columns(A)
         _, token = gettoken(histogram, x)

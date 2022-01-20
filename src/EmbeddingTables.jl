@@ -33,10 +33,9 @@ import StrideArraysCore
 
 # Execution strategies describe how to perform `maplookup` across an ensemble of embedding
 # tables.
-# The `DefaulfExecutionStrategy` merely defaults to serializing `lookup` across each
-# embedding table.
+# The `DefaulfExecutionStrategy` defaults to serializing `lookup` across each table.
 #
-# This provides an entry point for developing strategies specialized for PMM
+# This provides an entry point for developing specialized strategies.
 abstract type AbstractExecutionStrategy end
 const VecOrMat{T} = Union{<:AbstractVector{T},<:AbstractMatrix{T}}
 
@@ -74,14 +73,14 @@ struct Update <: IndexingContext end
 Base.@propagate_inbounds function columnpointer(A::AbstractMatrix{T}, i::Integer) where {T}
     return pointer(A) + strides(A)[2] * sizeof(T) * (i - 1)
 end
-columnpointer(A::AbstractEmbeddingTable, _::Integer) =
-    throw(ArgumentError("Please explicitly define `columnpointer` for $(typeof(A))"))
 
 # Implicitly remove "IndexingContext"
-function columnpointer(A::AbstractMatrix, i::Integer, ::IndexingContext)
-    Base.@_inline_meta
+@inline function columnpointer(A::AbstractMatrix, i::Integer, ::IndexingContext)
     return columnpointer(A, i)
 end
+
+columnpointer(A::AbstractEmbeddingTable, ::Integer) =
+    throw(ArgumentError("Please explicitly define `columnpointer` for $(typeof(A))"))
 
 #####
 ##### ColumnView
