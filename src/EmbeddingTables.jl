@@ -1,15 +1,23 @@
 module EmbeddingTables
 
+#####
+##### Exports
+#####
+
 # types
 export AbstractEmbeddingTable, SimpleEmbedding, SplitEmbedding
 export SparseEmbeddingUpdate, Static, Dynamic
 export IndexingContext, NoContext, Forward, Update
 
 # functions
-export lookup, maplookup, featuresize
+export lookup, maplookup, featuresize, example
 
 # strategies
 export DefaultStrategy, SimpleParallelStrategy, PreallocationStrategy, Slicer
+
+#####
+##### Imports
+#####
 
 # deps
 import ArrayInterface: ArrayInterface
