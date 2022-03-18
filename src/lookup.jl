@@ -88,8 +88,8 @@ end
                 Tuple{$dst,AbstractEmbeddingTable,$indices},
                 dst,
                 src,
-                indices
-           )
+                indices,
+            )
         end
     end
 end
@@ -98,41 +98,74 @@ end
 ##### Reducing (sum)
 #####
 
-function _reducing_lookup_kernel(
-    ::Type{SVector{N,T}},
+# function _reducing_lookup_kernel(
+#     ::Type{SVector{N,T}},
+#     table::AbstractEmbeddingTable,
+#     indices::AbstractVector,
+# ) where {N,T}
+#     Base.@_inline_meta
+#     col = @inbounds indices[1]
+#     # Move the first element into registers
+#     ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col, Forward()))
+#     accumulator = unsafe_load(ptr)
+#     for i = 2:(lastindex(indices))
+#         @_ivdep_meta
+#         col = @inbounds indices[i]
+#         ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col, Forward()))
+#         accumulator += unsafe_load(ptr)
+#     end
+#     return accumulator
+# end
+
+@inline function _reducing_lookup_kernel(
+    ::Type{Tiled},
     table::AbstractEmbeddingTable,
     indices::AbstractVector,
-) where {N,T}
-    Base.@_inline_meta
-    col = @inbounds indices[1]
-    # Move the first element into registers
-    ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col, Forward()))
-    accumulator = unsafe_load(ptr)
-    for i = 2:(lastindex(indices))
+) where {Tiled<:TiledSIMD}
+    col = @inbounds(indices[begin])
+    accumulator = load(Tiled, columnpointer(table, col, Forward()))
+    for i = 2:lastindex(indices)
         @_ivdep_meta
         col = @inbounds indices[i]
-        ptr = convert(Ptr{SVector{N,T}}, columnpointer(table, col, Forward()))
-        accumulator += unsafe_load(ptr)
+        accumulator += load(Tiled, columnpointer(table, col, Forward()))
     end
     return accumulator
 end
 
-function _reducing_lookup_kernel!(
-    ::Type{SVector{N,T}},
+# function _reducing_lookup_kernel!(
+#     ::Type{SVector{N,T}},
+#     dst,
+#     src::AbstractEmbeddingTable,
+#     indices::AbstractMatrix{<:Integer},
+# ) where {N,T}
+#     Base.@_inline_meta
+#     for dst_col in axes(dst, 2)
+#         accumulator = _reducing_lookup_kernel(
+#             SVector{N,T},
+#             src,
+#             Base.unsafe_view(indices, axes(indices, static(1)), dst_col),
+#         )
+#         dst_ptr = Ptr{SVector{N,T}}(columnpointer(dst, dst_col, Forward()))
+#         unsafe_store!(dst_ptr, accumulator)
+#     end
+#     return nothing
+# end
+
+@inline function _reducing_lookup_kernel!(
+    ::Type{Tiled},
     dst,
     src::AbstractEmbeddingTable,
     indices::AbstractMatrix{<:Integer},
-) where {N,T}
-    Base.@_inline_meta
+) where {Tiled<:TiledSIMD}
     for dst_col in axes(dst, 2)
         accumulator = _reducing_lookup_kernel(
-            SVector{N,T},
+            Tiled,
             src,
             Base.unsafe_view(indices, axes(indices, static(1)), dst_col),
         )
-        dst_ptr = Ptr{SVector{N,T}}(columnpointer(dst, dst_col, Forward()))
-        unsafe_store!(dst_ptr, accumulator)
+        store(accumulator, columnpointer(dst, dst_col, Forward()), Val(true))
     end
+    sfence()
     return nothing
 end
 
@@ -148,7 +181,9 @@ end
     # The static sizing information will carry over to the code generation.
     bytes = N * sizeof(T)
     if bytes <= MAX_ACCUMULATOR_SIZE
-        return :(_reducing_lookup_kernel!(SVector{N,T}, dst, src, indices))
+        K = div(N,16)
+        return :(_reducing_lookup_kernel!(TiledSIMD{$K,16,T}, dst, src, indices))
+        #return :(_reducing_lookup_kernel!(SVector{N,T}, dst, src, indices))
     else
         return quote
             Base.invoke(
@@ -156,18 +191,14 @@ end
                 Tuple{$dst,AbstractEmbeddingTable,$indices},
                 dst,
                 src,
-                indices
-           )
+                indices,
+            )
         end
     end
 end
 
 # fallback implementation
-function lookup!(
-    O,
-    A::AbstractEmbeddingTable,
-    I::AbstractMatrix{<:Integer},
-)
+function lookup!(O, A::AbstractEmbeddingTable, I::AbstractMatrix{<:Integer})
     for j in axes(I, 2)
         vO = columnview(O, featuresize(A), j, Forward())
         # First iteration
@@ -180,7 +211,7 @@ function lookup!(
         end
 
         # Accumulate all other times.
-        for i in 2:size(I, 1)
+        for i = 2:size(I, 1)
             col = @inbounds I[i, j]
             vA = columnview(A, col, Forward())
             @inbounds for k in axes(A, 1)
@@ -240,7 +271,7 @@ end
 # Generic pullback
 # Inform `ChainRulesCore` that `SparseEmbeddingUpdates` are suitable differentials for
 # `AbstractArray`s.
-(p::ChainRulesCore.ProjectTo{AbstractArray, <:NamedTuple})(x::SparseEmbeddingUpdate) = x
+(p::ChainRulesCore.ProjectTo{AbstractArray,<:NamedTuple})(x::SparseEmbeddingUpdate) = x
 function ChainRulesCore.rrule(
     ::typeof(maplookup_impl),
     strategy::AbstractExecutionStrategy,
@@ -293,7 +324,7 @@ _select_eltype(::Type{U}, ::Type{T}) where {U,T} = U
 
 _batchsize(x::AbstractVector{<:AbstractArray}) = _trailing_size(first(x))
 _batchsize(::AbstractVector{<:Integer}) = 1
-_batchsize(x::AbstractArray{<:Integer,N}) where {N} = size(x, N-1)
+_batchsize(x::AbstractArray{<:Integer,N}) where {N} = size(x, N - 1)
 _batchsize(x::ColumnWrap) = _batchsize(unwrap(x))
 
 cdiv(a::Integer, b::Integer) = cdiv(promote(a, b)...)

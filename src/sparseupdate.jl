@@ -90,11 +90,10 @@ function _update_generic_impl!(
             i += 1
         end
 
+        # Update using nontemporal stores.
         tableview = columnview(table, k, Update())
-        #f(x, y) = x - alpha * y
-        LoopVectorization.vmap!(AlphaCapture(alpha), tableview, tableview, scratchspace)
-        #LoopVectorization.vmapnt!(f, tableview, tableview, scratchspace)
-        #LoopVectorization.vmap!(f, tableview, tableview, scratchspace)
+        f(x, y) = x - alpha * y
+        LoopVectorization.vmapnt!(f, tableview, tableview, scratchspace)
     end
 end
 

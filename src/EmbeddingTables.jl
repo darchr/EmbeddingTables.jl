@@ -159,6 +159,7 @@ end
 
 # utils
 include("utils.jl")
+include("simd.jl")
 
 # interface
 function lookup end
