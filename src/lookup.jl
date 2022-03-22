@@ -298,7 +298,7 @@ function maplookup_impl(_::SimpleParallelStrategy, x::Vector{<:AbstractEmbedding
     # Need to capture this as a `ManualMemory.reference` to keep ManualMemory
     # from exploding while trying to store all the cached array stuff.
     ref = ManualMemory.Reference(I)
-    Polyester.@batch (per = core) for i in eachindex(x)
+    Polyester.@batch (per = thread) for i in eachindex(x)
         out[i] = lookup(x[i], ManualMemory.dereference(ref)[i])
     end
     return out
@@ -367,7 +367,8 @@ function maplookup_impl(
     len = worksize_div * length(x)
     divisor = length(x)
     count = Threads.Atomic{Int}(1)
-    Polyester.@batch (per = core) for _ in Base.OneTo(Threads.nthreads())
+    Polyester.@batch (per = thread) for _ in Base.OneTo(Threads.nthreads())
+    #Threads.@threads for _ in Base.OneTo(Threads.nthreads())
         while true
             k = Threads.atomic_add!(count, 1)
             k > len && break

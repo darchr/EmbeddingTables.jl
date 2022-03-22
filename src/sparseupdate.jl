@@ -189,14 +189,14 @@ function update!(
     scratchspaces = map(scratch(first(tables)), 1:Threads.nthreads()),
 )
     # First, index all of the tables.
-    Polyester.@batch (per = core) for i in eachindex(indexers, grads)
+    Polyester.@batch (per = thread) for i in eachindex(indexers, grads)
         index!(indexers[i], grads[i].indices)
     end
 
     # Now - do the work of updating
     len = num_splits * length(tables)
     count = Threads.Atomic{Int}(1)
-    Polyester.@batch (per = core) for tid in Base.OneTo(nthreads)
+    Polyester.@batch (per = thread) for tid in Base.OneTo(nthreads)
         while true
             k = Threads.atomic_add!(count, 1)
             k > len && break
