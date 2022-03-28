@@ -10,7 +10,7 @@ export SparseEmbeddingUpdate, Static, Dynamic
 export IndexingContext, NoContext, Forward, Update
 
 # functions
-export lookup, maplookup, featuresize, example
+export lookup, maplookup, featuresize, example, columnpointer
 
 # strategies
 export DefaultStrategy, SimpleParallelStrategy, PreallocationStrategy, Slicer
