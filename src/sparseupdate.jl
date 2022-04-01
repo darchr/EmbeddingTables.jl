@@ -47,27 +47,21 @@ function update!(
     table::AbstractEmbeddingTable{S,T},
     update::SparseEmbeddingUpdate{S},
     indexer::AbstractIndexer,
-    alpha;
+    alpha,
+    ::Val{Nontemporal};
     kw...,
-) where {S,T}
-    return _update_generic_impl!(table, update, indexer, alpha; kw...)
+) where {S,T,Nontemporal}
+    return _update_generic_impl!(table, update, indexer, alpha, Val(Nontemporal); kw...)
 end
-
-# LoopVectorization seems to have a hard time optimizing closures (i.e., using `vmapnt!`
-# for a closure capturing the `alpha` parameter for SGD).
-# Here, we use an explicit struct to try and help out LoopVectorization's codegen.
-struct AlphaCapture{T}
-    alpha::T
-end
-(f::AlphaCapture)(x, y) = x - (f.alpha) * y
 
 function _update_generic_impl!(
     table::AbstractEmbeddingTable{S,T},
     update::SparseEmbeddingUpdate{S},
     indexer::AbstractIndexer,
     alpha,
+    ::Val{Nontemporal} = Val(true);
     scratchspace::AbstractVector = Vector{T}(undef, featuresize(table)),
-) where {S,T}
+) where {S,T,Nontemporal}
     Base.@_inline_meta
     @assert length(scratchspace) == featuresize(table)
 
@@ -93,7 +87,11 @@ function _update_generic_impl!(
         # Update using nontemporal stores.
         tableview = columnview(table, k, Update())
         f(x, y) = x - alpha * y
-        LoopVectorization.vmapnt!(f, tableview, tableview, scratchspace)
+        if Nontemporal
+            LoopVectorization.vmapnt!(f, tableview, tableview, scratchspace)
+        else
+            LoopVectorization.vmap!(f, tableview, tableview, scratchspace)
+        end
     end
 end
 
@@ -102,7 +100,9 @@ function _update_specialized_impl!(
     update::SparseEmbeddingUpdate{Static{N}},
     indexer::AbstractIndexer,
     alpha,
-) where {N,T}
+    ::Val{Nontemporal} = Val(true);
+    kw...,
+) where {N,T,Nontemporal}
     Base.@_inline_meta
 
     grads = update.delta
@@ -129,17 +129,24 @@ function _update_specialized_impl!(
         tableview = columnview(table, k, Update())
         ref = Ref(accum)
         GC.@preserve ref begin
-            ptrarray = StrideArraysCore.PtrArray(
-                Base.unsafe_convert(Ptr{T}, ref),
-                (static(N),),
-            )
+            ptrarray =
+                StrideArraysCore.PtrArray(Base.unsafe_convert(Ptr{T}, ref), (static(N),))
 
-            LoopVectorization.vmapnt!(
-                (x,y) -> x - alpha * y,
-                tableview,
-                tableview,
-                ptrarray,
-            )
+            if Nontemporal
+                LoopVectorization.vmapnt!(
+                    (x, y) -> x - alpha * y,
+                    tableview,
+                    tableview,
+                    ptrarray,
+                )
+            else
+                LoopVectorization.vmap!(
+                    (x, y) -> x - alpha * y,
+                    tableview,
+                    tableview,
+                    ptrarray,
+                )
+            end
         end
     end
 end
@@ -149,15 +156,23 @@ end
     update::SparseEmbeddingUpdate{Static{N}},
     indexer::AbstractIndexer,
     alpha,
-    args...,
-) where {N,T}
+    ::Val{Nontemporal} = Val(true);
+    kw...,
+) where {N,T,Nontemporal}
     bytes = N * sizeof(T)
     # Slightly smaller heuristic for all-registers.
     if bytes <= div(MAX_ACCUMULATOR_SIZE, 2)
         # No need to forward any keywords to the specialized implementation.
-        return :(_update_specialized_impl!(table, update, indexer, alpha))
+        return :(_update_specialized_impl!(table, update, indexer, alpha, Val(Nontemporal)))
     else
-        return :(_update_generic_impl!(table, update, indexer, alpha, args...))
+        return :(_update_generic_impl!(
+            table,
+            update,
+            indexer,
+            alpha,
+            Val(Nontemporal);
+            kw...,
+        ))
     end
 end
 
@@ -165,10 +180,35 @@ end
 ##### Flux Compat
 #####
 
-function Flux.Optimise.update!(opt, x, xbar::SparseEmbeddingUpdate, indexer = Indexer())
-    index!(indexer, xbar.indices)
-    update!(x, xbar, indexer, convert(Float32, opt.eta))
+function update!(
+    opt::Flux.Descent,
+    table::AbstractEmbeddingTable,
+    update::SparseEmbeddingUpdate,
+    indexer = Indexer(),
+    ::Val{Nontemporal} = Val(true);
+    kw...,
+) where {Nontemporal}
+    index!(indexer, update.indices)
+    update!(
+        table,
+        update,
+        indexer,
+        convert(eltype(table), opt.eta),
+        Val(Nontemporal);
+        kw...,
+    )
     return nothing
+end
+
+function Flux.Optimise.update!(
+    opt,
+    x,
+    xbar::SparseEmbeddingUpdate,
+    indexer = Indexer(),
+    ::Val{Nontemporal} = Val(true);
+    kw...,
+) where {Nontemporal}
+    return update!(opt, x, xbar, indexer, Val(Nontemporal); kw...)
 end
 
 #####
@@ -183,11 +223,12 @@ function update!(
     opt::Flux.Descent,
     tables::AbstractVector{<:AbstractEmbeddingTable},
     grads::AbstractVector{<:SparseEmbeddingUpdate},
-    indexers::Vector{Indexer};
+    indexers::Vector{Indexer},
+    ::Val{Nontemporal};
     num_splits = 4,
     nthreads = Threads.nthreads(),
     scratchspaces = map(scratch(first(tables)), 1:Threads.nthreads()),
-)
+) where {Nontemporal}
     # First, index all of the tables.
     Polyester.@batch (per = thread) for i in eachindex(indexers, grads)
         index!(indexers[i], grads[i].indices)
@@ -204,7 +245,14 @@ function update!(
             i, j = _divrem_index(k, num_splits)
             indexer_view = IndexerView(indexers[i], num_splits, j)
             scratchspace = scratchspaces[tid]
-            update!(tables[i], grads[i], indexer_view, opt.eta, scratchspace)
+            update!(
+                tables[i],
+                grads[i],
+                indexer_view,
+                opt.eta,
+                Val(Nontemporal);
+                scratchspace = scratchspace,
+            )
         end
     end
 end

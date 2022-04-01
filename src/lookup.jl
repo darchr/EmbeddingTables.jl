@@ -18,8 +18,7 @@ end
 
 _trailing_size(x::AbstractArray{<:Any,N}) where {N} = size(x, N)
 function destination(A::AbstractEmbeddingTable, I::VecOrMat{<:Integer})
-    nrows = featuresize(A)
-    return similar(example(A), eltype(A), nrows, _trailing_size(I))
+    return similar(example(A), eltype(A), featuresize(A), _trailing_size(I))
 end
 
 #####
@@ -29,7 +28,6 @@ end
 # Maximum amount of state we will keep in the CPU registers during accumulation.
 # If necessary, we will make multiple passes for larger feature sizes.
 const MAX_ACCUMULATOR_SIZE = 1024
-
 
 # Need these definitions to avoid method ambiguity
 @inline lookup(A::AbstractEmbeddingTable, I::AbstractVector{<:Integer}) = _lookup(A, I)
