@@ -47,10 +47,11 @@ Base.IndexStyle(::SimpleEmbedding) = Base.IndexLinear()
 ##### EmbeddingTable Interface
 #####
 
-@inline Base.pointer(A::SimpleEmbedding) = pointer(A.data)
-columnpointer(A::SimpleEmbedding, i::Integer) = columnpointer(A.data, i)
+@inline Base.parent(A::SimpleEmbedding) = A.data
+@inline Base.pointer(A::SimpleEmbedding) = pointer(parent(A))
+columnpointer(A::SimpleEmbedding, i::Integer) = columnpointer(parent(A), i)
 function columnpointer(A::SimpleEmbedding{Static{N},T}, i::Integer) where {N,T}
-    return pointer(A.data) + (i - 1) * N * sizeof(T)
+    return pointer(A) + (i - 1) * N * sizeof(T)
 end
 example(A::SimpleEmbedding) = A.data
 

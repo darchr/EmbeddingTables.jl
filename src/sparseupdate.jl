@@ -227,7 +227,7 @@ function update!(
     ::Val{Nontemporal};
     num_splits = 4,
     nthreads = Threads.nthreads(),
-    scratchspaces = map(scratch(first(tables)), 1:Threads.nthreads()),
+    scratchspaces = map(scratch(first(tables)), Base.OneTo(nthreads)),
 ) where {Nontemporal}
     # First, index all of the tables.
     Polyester.@batch (per = thread) for i in eachindex(indexers, grads)

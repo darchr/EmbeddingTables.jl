@@ -12,7 +12,7 @@ function _update_inner(
     ncols = size(table, 2)
 
     opt = Flux.Descent(10.0)
-    for _ in 1:numtests
+    for _ = 1:numtests
         # Generate random lookup indices which may include repeats.
         indices_base = rand(1:ncols, f(ncols)...)
         indices = copy(indices_base)
@@ -60,7 +60,7 @@ function _update_inner(
         Flux.Optimise.update!(opt, zeros_table, diff_table)
         @test isapprox(zeros_baseline, zeros_table)
 
-        # Also try with with the partitioner to ensure that it's logic is correct.
+        # Try again, this time using standard astores
         out_ref, back_ref = Zygote._pullback(lookup, copy(baseline), copy(indices_base))
         out, back = Zygote._pullback(lookup, table, copy(indices_base))
 
@@ -72,6 +72,14 @@ function _update_inner(
 
         @test isa(zeros_table, AbstractEmbeddingTable)
         Flux.Optimise.update!(opt, zeros_baseline, diff_baseline)
+        Flux.Optimise.update!(
+            opt,
+            zeros_table,
+            diff_table,
+            EmbeddingTables.Indexer(),
+            Val(false),
+        )
+        @test isapprox(zeros_baseline, zeros_table)
     end
 end
 
