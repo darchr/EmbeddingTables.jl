@@ -11,9 +11,15 @@ end
 simdtype(::Type{Float32}) = SIMD.Vec{16,Float32}
 simdtype(::Type{TiledSIMD{K,N,T}}) where {K,N,T} = SIMD.Vec{N,T}
 
-
 Base.length(::Type{TiledSIMD{K,N,T}}) where {K,N,T} = K
 Base.getindex(v::TiledSIMD{K,N,T}, i::Integer) where {K,N,T} = v.tiles[i]
+
+@inline function Base.zero(::Type{TiledSIMD{K,N,T}}) where {K,N,T}
+    tuple = ntuple(Val(K)) do _
+        return zero(SIMD.Vec{N,T})
+    end
+    return TiledSIMD{K,N,T}(tuple)
+end
 
 @inline function load(::Type{TiledSIMD{K,N,T}}, ptr::Ptr{T}) where {K,N,T}
     tuple = ntuple(Val(K)) do i
@@ -41,6 +47,13 @@ end
 @inline function Base.:+(a::TiledSIMD{K,N,T}, b::TiledSIMD{K,N,T}) where {K,N,T}
     tuple = ntuple(Val(K)) do i
         return a[i] + b[i]
+    end
+    return TiledSIMD{K,N,T}(tuple)
+end
+
+@inline function Base.muladd(x::T, y::TiledSIMD{K,N,T}, z::TiledSIMD{K,N,T}) where {T,K,N}
+    tuple = ntuple(Val(K)) do i
+        return muladd(x, y[i], z[i])
     end
     return TiledSIMD{K,N,T}(tuple)
 end

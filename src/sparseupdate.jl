@@ -48,21 +48,20 @@ function update!(
     update::SparseEmbeddingUpdate{S},
     indexer::AbstractIndexer,
     alpha,
-    ::Val{Nontemporal};
-    kw...,
+    ::Val{Nontemporal},
+    args...
 ) where {S,T,Nontemporal}
-    return _update_generic_impl!(table, update, indexer, alpha, Val(Nontemporal); kw...)
+    return _update_generic_impl!(table, update, indexer, alpha, Val(Nontemporal), args...)
 end
 
-function _update_generic_impl!(
+@inline function _update_generic_impl!(
     table::AbstractEmbeddingTable{S,T},
     update::SparseEmbeddingUpdate{S},
     indexer::AbstractIndexer,
     alpha,
-    ::Val{Nontemporal} = Val(true);
+    ::Val{Nontemporal} = Val(true),
     scratchspace::AbstractVector = Vector{T}(undef, featuresize(table)),
 ) where {S,T,Nontemporal}
-    Base.@_inline_meta
     @assert length(scratchspace) == featuresize(table)
 
     grads = update.delta
@@ -95,59 +94,37 @@ function _update_generic_impl!(
     end
 end
 
-function _update_specialized_impl!(
+@inline function _update_specialized_impl!(
     table::AbstractEmbeddingTable{Static{N},T},
     update::SparseEmbeddingUpdate{Static{N}},
     indexer::AbstractIndexer,
-    alpha,
+    alpha0,
     ::Val{Nontemporal} = Val(true);
     kw...,
 ) where {N,T,Nontemporal}
-    Base.@_inline_meta
+    Tiled = simdtype(Static{N}(), T)
 
     grads = update.delta
+    alpha = -convert(T, alpha0)
     cumulative, map = gettranslations(indexer)
     @inbounds for entry in Base.OneTo(length(cumulative) - 1)
         k, start = cumulative[entry]
         stop = cumulative[entry + 1].offset - 1
 
-        accum = zeros(SVector{N,T})
+        accum = zero(Tiled)
         i = start
         while i <= stop
             col = map[i]
-            accum += unsafe_load(Ptr{SVector{N,T}}(columnpointer(grads, col, Update())))
+            accum += load(Tiled, columnpointer(grads, col, Update()))
             i += 1
         end
 
-        # Done accumulating - time to write back out update.
-        #
-        # Need to manually specifiy that the pointer address for `accum` is stable because
-        # LoopVectorization's automatic treatment doesn't preserve a pointer to `accum`
-        # correctly.
-        #
-        # Julia is able to elide the creation of the `Ref` altogether.
-        tableview = columnview(table, k, Update())
-        ref = Ref(accum)
-        GC.@preserve ref begin
-            ptrarray =
-                StrideArraysCore.PtrArray(Base.unsafe_convert(Ptr{T}, ref), (static(N),))
-
-            if Nontemporal
-                LoopVectorization.vmapnt!(
-                    (x, y) -> x - alpha * y,
-                    tableview,
-                    tableview,
-                    ptrarray,
-                )
-            else
-                LoopVectorization.vmap!(
-                    (x, y) -> x - alpha * y,
-                    tableview,
-                    tableview,
-                    ptrarray,
-                )
-            end
-        end
+        dest_ptr = columnpointer(table, k, Update())
+        store(
+            muladd(alpha, accum, load(Tiled, dest_ptr)),
+            dest_ptr,
+            Val(Nontemporal),
+        )
     end
 end
 
@@ -156,8 +133,8 @@ end
     update::SparseEmbeddingUpdate{Static{N}},
     indexer::AbstractIndexer,
     alpha,
-    ::Val{Nontemporal} = Val(true);
-    kw...,
+    ::Val{Nontemporal} = Val(true),
+    args...,
 ) where {N,T,Nontemporal}
     bytes = N * sizeof(T)
     # Slightly smaller heuristic for all-registers.
@@ -170,8 +147,8 @@ end
             update,
             indexer,
             alpha,
-            Val(Nontemporal);
-            kw...,
+            Val(Nontemporal),
+            args...,
         ))
     end
 end
@@ -185,8 +162,8 @@ function update!(
     table::AbstractEmbeddingTable,
     update::SparseEmbeddingUpdate,
     indexer = Indexer(),
-    ::Val{Nontemporal} = Val(true);
-    kw...,
+    ::Val{Nontemporal} = Val(true),
+    args...,
 ) where {Nontemporal}
     index!(indexer, update.indices)
     update!(
@@ -194,8 +171,8 @@ function update!(
         update,
         indexer,
         convert(eltype(table), opt.eta),
-        Val(Nontemporal);
-        kw...,
+        Val(Nontemporal),
+        args...,
     )
     return nothing
 end
@@ -205,10 +182,10 @@ function Flux.Optimise.update!(
     x,
     xbar::SparseEmbeddingUpdate,
     indexer = Indexer(),
-    ::Val{Nontemporal} = Val(true);
-    kw...,
+    ::Val{Nontemporal} = Val(true),
+    args...
 ) where {Nontemporal}
-    return update!(opt, x, xbar, indexer, Val(Nontemporal); kw...)
+    return update!(opt, x, xbar, indexer, Val(Nontemporal), args...)
 end
 
 #####
@@ -224,7 +201,7 @@ function update!(
     tables::AbstractVector{<:AbstractEmbeddingTable},
     grads::AbstractVector{<:SparseEmbeddingUpdate},
     indexers::Vector{Indexer},
-    ::Val{Nontemporal};
+    ::Val{Nontemporal} = Val(true);
     num_splits = 4,
     nthreads = Threads.nthreads(),
     scratchspaces = map(scratch(first(tables)), Base.OneTo(nthreads)),
@@ -237,21 +214,22 @@ function update!(
     # Now - do the work of updating
     len = num_splits * length(tables)
     count = Threads.Atomic{Int}(1)
+    # N.B. - need to hoist out the construction of the `Val` struct because Polyester's
+    # macro handling doesn't propagate the `const`-ness of `Nontemporal`.
+    valnt = Val(Nontemporal)
     Polyester.@batch (per = thread) for tid in Base.OneTo(nthreads)
         while true
             k = Threads.atomic_add!(count, 1)
             k > len && break
 
             i, j = _divrem_index(k, num_splits)
-            indexer_view = IndexerView(indexers[i], num_splits, j)
-            scratchspace = scratchspaces[tid]
             update!(
                 tables[i],
                 grads[i],
-                indexer_view,
+                IndexerView(indexers[i], num_splits, j),
                 opt.eta,
-                Val(Nontemporal);
-                scratchspace = scratchspace,
+                valnt,
+                scratchspaces[tid],
             )
         end
     end
