@@ -205,11 +205,13 @@ function update!(
     num_splits = 4,
     nthreads = Threads.nthreads(),
     scratchspaces = map(scratch(first(tables)), Base.OneTo(nthreads)),
+    telemetry_cb = Returns(nothing)
 ) where {Nontemporal}
     # First, index all of the tables.
     Polyester.@batch (per = thread) for i in eachindex(indexers, grads)
         index!(indexers[i], grads[i].indices)
     end
+    telemetry_cb()
 
     # Now - do the work of updating
     len = num_splits * length(tables)

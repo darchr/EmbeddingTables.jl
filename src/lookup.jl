@@ -28,6 +28,8 @@ end
 # Maximum amount of state we will keep in the CPU registers during accumulation.
 # If necessary, we will make multiple passes for larger feature sizes.
 const MAX_ACCUMULATOR_SIZE = 1024
+dostatic(::AbstractEmbeddingTable{Static{N},T}) where {N,T} =
+    N * sizeof(T) <= MAX_ACCUMULATOR_SIZE
 
 # Need these definitions to avoid method ambiguity
 @inline lookup(A::AbstractEmbeddingTable, I::AbstractVector{<:Integer}) = _lookup(A, I)
@@ -37,12 +39,20 @@ function _lookup(A::AbstractEmbeddingTable, I::VecOrMat{<:Integer})
     return lookup!(destination(A, I), A, I)
 end
 
+lookup!(dst, src::AbstractEmbeddingTable, indices::VecOrMat{<:Integer}) =
+    lookup_generic!(dst, src, indices)
+
 #####
 ##### Non-reducing
 #####
 
+
 # Generic fallback case
-function lookup!(dst, src::AbstractEmbeddingTable, indices::AbstractVector{<:Integer})
+function lookup_generic!(
+    dst,
+    src::AbstractEmbeddingTable,
+    indices::AbstractVector{<:Integer},
+)
     for (dst_col, src_col) in enumerate(indices)
         @inbounds src_view = columnview(src, src_col, Forward())
         @inbounds dst_view = columnview(dst, dst_col, Forward())
@@ -57,7 +67,7 @@ function lookup!(dst, src::AbstractEmbeddingTable, indices::AbstractVector{<:Int
 end
 
 # single-shot load + store up to MAX_ACCUMULATOR_SIZE
-function _lookup_kernel!(
+function lookup_static!(
     ::Type{SVector{N,T}},
     dst,
     src::AbstractEmbeddingTable,
@@ -76,28 +86,18 @@ function _lookup_kernel!(
     return dst
 end
 
-@generated function lookup!(
+# Static Dispatch Logic
+@inline function lookup!(
     dst,
     src::AbstractEmbeddingTable{Static{N},T},
     indices::AbstractVector{<:Integer},
 ) where {N,T}
-    Base.@_inline_meta
     # First, check if we can do this in a single shot.
-    # If so, do that.
     # Otherwise, invoke the generic fallback.
-    bytes = N * sizeof(T)
-    if bytes <= MAX_ACCUMULATOR_SIZE
-        return :(_lookup_kernel!(SVector{N,T}, dst, src, indices))
+    if dostatic(src)
+        return lookup_static!(SVector{N,T}, dst, src, indices)
     else
-        return quote
-            Base.invoke(
-                lookup!,
-                Tuple{$dst,AbstractEmbeddingTable,$indices},
-                dst,
-                src,
-                indices,
-            )
-        end
+        return lookup_generic!(dst, src, indices)
     end
 end
 
@@ -105,68 +105,7 @@ end
 ##### Reducing (sum)
 #####
 
-@inline function _reducing_lookup_kernel(
-    ::Type{Tiled},
-    table::AbstractEmbeddingTable,
-    indices::AbstractVector,
-) where {Tiled<:TiledSIMD}
-    col = @inbounds(indices[begin])
-    accumulator = load(Tiled, @inbounds(columnpointer(table, col, Forward())))
-    for i = 2:lastindex(indices)
-        @_ivdep_meta
-        col = @inbounds indices[i]
-        accumulator += load(Tiled, @inbounds(columnpointer(table, col, Forward())))
-    end
-    return accumulator
-end
-
-@inline function _reducing_lookup_kernel!(
-    ::Type{Tiled},
-    dst,
-    src::AbstractEmbeddingTable,
-    indices::AbstractMatrix{<:Integer},
-) where {Tiled<:TiledSIMD}
-    for dst_col in axes(dst, 2)
-        accumulator = _reducing_lookup_kernel(
-            Tiled,
-            src,
-            Base.unsafe_view(indices, axes(indices, static(1)), dst_col),
-        )
-        store(accumulator, @inbounds(columnpointer(dst, dst_col, Forward())), Val(true))
-    end
-    sfence()
-    return dst
-end
-
-@generated function lookup!(
-    dst,
-    src::AbstractEmbeddingTable{Static{N},T},
-    indices::AbstractMatrix{<:Integer},
-) where {N,T}
-    Base.@_inline_meta
-    # First , check if we can hold all partial state in registers.
-    # If so, emit the simplest kernel possible.
-    # Otherwise, just fall back to the generic implementation.
-    # The static sizing information will carry over to the code generation.
-    bytes = N * sizeof(T)
-    if bytes <= MAX_ACCUMULATOR_SIZE
-        K = div(N, 16)
-        return :(_reducing_lookup_kernel!(TiledSIMD{$K,16,T}, dst, src, indices))
-    else
-        return quote
-            Base.invoke(
-                lookup!,
-                Tuple{$dst,AbstractEmbeddingTable,$indices},
-                dst,
-                src,
-                indices,
-            )
-        end
-    end
-end
-
-# fallback implementation
-function lookup!(O, A::AbstractEmbeddingTable, I::AbstractMatrix{<:Integer})
+function lookup_generic!(O, A::AbstractEmbeddingTable, I::AbstractMatrix{<:Integer})
     for j in axes(I, 2)
         vO = columnview(O, featuresize(A), j, Forward())
         # First iteration
@@ -191,6 +130,58 @@ function lookup!(O, A::AbstractEmbeddingTable, I::AbstractMatrix{<:Integer})
     end
     return O
 end
+
+@inline function lookup_static_inner(
+    ::Type{Tiled},
+    table::AbstractEmbeddingTable,
+    indices::AbstractVector,
+) where {Tiled<:TiledSIMD}
+    col = @inbounds(indices[begin])
+    accumulator = load(Tiled, @inbounds(columnpointer(table, col, Forward())))
+    for i = 2:lastindex(indices)
+        @_ivdep_meta
+        col = @inbounds indices[i]
+        accumulator += load(Tiled, @inbounds(columnpointer(table, col, Forward())))
+    end
+    return accumulator
+end
+
+@inline function lookup_static!(
+    ::Type{Tiled},
+    dst,
+    src::AbstractEmbeddingTable,
+    indices::AbstractMatrix{<:Integer},
+) where {Tiled<:TiledSIMD}
+    for dst_col in axes(dst, 2)
+        accumulator = lookup_static_inner(
+            Tiled,
+            src,
+            Base.unsafe_view(indices, axes(indices, static(1)), dst_col),
+        )
+        store(accumulator, @inbounds(columnpointer(dst, dst_col, Forward())), Val(true))
+    end
+    sfence()
+    return dst
+end
+
+@inline function lookup!(
+    dst,
+    src::AbstractEmbeddingTable{Static{N},T},
+    indices::AbstractMatrix{<:Integer},
+) where {N,T}
+    # First , check if we can hold all partial state in registers.
+    # If so, emit the simplest kernel possible.
+    # Otherwise, just fall back to the generic implementation.
+    # The static sizing information will carry over to the code generation.
+    if dostatic(src)
+        K = div(N, 16)
+        return lookup_static!(TiledSIMD{K,16,T}, dst, src, indices)
+    else
+        return lookup_generic!(dst, src, indices)
+    end
+end
+
+# fallback implementation
 
 ############################################################################################
 # Multiple table lookups
