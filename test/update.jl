@@ -91,29 +91,32 @@ end
     batchsize = 512
     base = randn(Float32, 16, 100)
     featuresize = size(base, 1)
-    A = SimpleEmbedding{Static{featuresize}}(copy(base))
-    delta = randn(Float32, featuresize, batchsize)
-    inds = rand(1:size(base, 2), batchsize)
 
-    grad = EmbeddingTables.SparseEmbeddingUpdate{Static{featuresize}}(delta, inds)
-    indexer = EmbeddingTables.Indexer()
-    EmbeddingTables.index!(indexer, grad.indices)
+    for indexer in (EmbeddingTables.SparseIndexer(), EmbeddingTables.DenseIndexer())
+        A = SimpleEmbedding{Static{featuresize}}(copy(base))
+        delta = randn(Float32, featuresize, batchsize)
+        inds = rand(1:size(base, 2), batchsize)
 
-    # Do the reference update
-    EmbeddingTables.update!(A, grad, indexer, Float32(1.0))
+        grad = EmbeddingTables.SparseEmbeddingUpdate{Static{featuresize}}(delta, inds)
+        indexer = EmbeddingTables.Indexer()
+        EmbeddingTables.index!(indexer, grad.indices, size(base, 2))
 
-    # Now, do a partitioned update.
-    B = SimpleEmbedding{Static{featuresize}}(copy(base))
-    num_splits = 4
-    for this_split in Base.OneTo(num_splits)
-        EmbeddingTables.update!(
-            B,
-            grad,
-            EmbeddingTables.IndexerView(indexer, num_splits, this_split),
-            Float32(1.0),
-        )
+        # Do the reference update
+        EmbeddingTables.update!(A, grad, indexer, Float32(1.0))
+
+        # Now, do a partitioned update.
+        B = SimpleEmbedding{Static{featuresize}}(copy(base))
+        num_splits = 4
+        for this_split in Base.OneTo(num_splits)
+            EmbeddingTables.update!(
+                B,
+                grad,
+                EmbeddingTables.IndexerView(indexer, num_splits, this_split),
+                Float32(1.0),
+            )
+        end
+        @test A == B
     end
-    @test A == B
 end
 
 @testset "Testing Update" begin

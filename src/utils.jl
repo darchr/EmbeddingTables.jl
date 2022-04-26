@@ -65,7 +65,7 @@ end
 ##### Utils for fast reverse indexing.
 #####
 
-struct ColumnIter{A <: AbstractMatrix}
+struct ColumnIter{A<:AbstractMatrix}
     iter::A
 end
 
@@ -79,31 +79,33 @@ function Base.iterate(x::ColumnIter, (col, row) = (1, 1))
     return (col, item), (nextcol, nextrow)
 end
 Base.length(x::ColumnIter) = length(x.iter)
-Base.eltype(::Type{ColumnIter{A}}) where {T, A <: AbstractMatrix{T}} = Tuple{Int,T}
+Base.eltype(::Type{ColumnIter{A}}) where {T,A<:AbstractMatrix{T}} = Tuple{Int,T}
 
 _maybe_columnview(x::AbstractVector, i, ::IndexingContext) = (x[i],)
 _maybe_columnview(x::AbstractMatrix, i, ctx::IndexingContext) = columnview(x, i, ctx)
 
-function histogram!(d::AbstractDictionary, A::AbstractArray)
-    shallow_empty!(d)
-    return unsafe_histogram!(d, A)
-end
+#####
+##### Histograms
+#####
 
-function unsafe_histogram!(d::AbstractDictionary, A::AbstractArray)
-    Base.@_inline_meta
-    order = 1
-    for a in A
-        hasindex, token = gettoken!(d, a)
-        if hasindex
-            _order, _count = @inbounds gettokenvalue(d, token)
-            @inbounds settokenvalue!(d, token, (; order = _order, count = _count + 1))
-        else
-            @inbounds settokenvalue!(d, token, (; order = order, count = 1))
-            order += 1
-        end
-    end
-    return d
+struct OrderCount{T<:Integer}
+    order::T
+    count::T
 end
+Base.zero(::Type{OrderCount{T}}) where {T} = OrderCount(zero(T), zero(T))
+# Note: indexed_iterate wants a "state" as the third argument to work properly, so
+# add an unused third-argument to make this work.
+Base.indexed_iterate(x::OrderCount, i::Int, _ = 1) = (getfield(x, i), i + 1)
+
+struct ColOffset{T<:Integer}
+    col::T
+    offset::T
+end
+Base.zero(::Type{ColOffset{T}}) where {T} = ColOffset(zero(T), zero(T))
+Base.indexed_iterate(x::ColOffset, i::Int, _ = 1) = (getfield(x, i), i + 1)
+
+resize_histogram!(_, _) = nothing
+resize_histogram!(array::AbstractVector, maxsize) = resize!(array, maxsize)
 
 # Hack Warning - reaching into the internals of `Dictionaries.jl`
 function shallow_empty!(dict::Dictionary)
@@ -119,75 +121,166 @@ function shallow_empty!(dict::Dictionary)
     return dict
 end
 
-# Use an `AbstractIndexer` so we can potentially chunk up an actual `Indexer` for
-# better parallel load balancing.
-abstract type AbstractIndexer end
-struct Indexer <: AbstractIndexer
-    histogram::Dictionary{Int,NamedTuple{(:order, :count),Tuple{Int,Int}}}
-    # Mapping of source column to its start in the accumulation vector
-    cumulative::Vector{NamedTuple{(:col, :offset),Tuple{Int,Int}}}
-    map::Vector{Int}
+function shallow_empty!(array::AbstractArray{T}) where {T}
+    @inbounds for i in eachindex(array)
+        array[i] = zero(T)
+    end
 end
 
-gettranslations(I::Indexer) = I.cumulative, I.map
-
-function Indexer()
-    histogram = Dictionary{Int,NamedTuple{(:order, :count),Tuple{Int,Int}}}()
-    cumulative = Vector{NamedTuple{(:col, :offset),Tuple{Int,Int}}}()
-    map = Vector{Int}()
-    return Indexer(histogram, cumulative, map)
+function histogram!(histogram, A::AbstractArray)
+    shallow_empty!(histogram)
+    return unsafe_histogram!(histogram, A)
 end
 
-function Base.empty!(I::Indexer)
-    shallow_empty!(I.histogram)
-    return I
+@inline function unsafe_histogram!(
+    d::AbstractDictionary{K,V},
+    A::AbstractArray,
+) where {K<:Integer,V<:OrderCount}
+    order = 0
+    for a in A
+        hasindex, token = gettoken!(d, a)
+        if hasindex
+            _order, _count = @inbounds gettokenvalue(d, token)
+            @inbounds settokenvalue!(d, token, V(_order, _count + 1))
+        else
+            order += 1
+            @inbounds settokenvalue!(d, token, V(order, 1))
+        end
+    end
+    return order
 end
 
-function prefixsum!(I::Indexer)
-    (; cumulative, histogram) = I
-    resize!(cumulative, length(histogram) + 1)
+@inline function unsafe_histogram!(
+    histogram::AbstractArray{V},
+    A::AbstractArray,
+) where {V<:OrderCount}
+    order = 0
+    for a in A
+        thisorder, thiscount = @inbounds(histogram[a])
+        seenbefore = !iszero(thisorder)
+
+        thisorder = ifelse(seenbefore, thisorder, order + 1)
+        order = ifelse(seenbefore, order, order + 1)
+        @inbounds histogram[a] = V(thisorder, thiscount + one(thiscount))
+    end
+    return order
+end
+
+### Prefix Sum
+function prefixsum!(
+    cumulative::AbstractVector{T},
+    histogram::Dictionary,
+    nnz::Integer = length(histogram),
+) where {T<:ColOffset}
+    resize!(cumulative, nnz + 1)
     next_offset = 1
 
-    # The commented out routine is slightly faster, but has more allocations
-    # @inbounds for (i, (k, (_, v))) in enumerate(pairs(histogram))
-    #     cumulative[i] = (; col = k, offset = next_offset)
-    #     next_offset += v
-    # end
-
-    @inbounds for (i, k) in enumerate(keys(histogram))
-        v = histogram[k].count
-        cumulative[i] = (; col = k, offset = next_offset)
+    @inbounds for (k, (i, v)) in pairs(histogram)
+        cumulative[i] = T(k, next_offset)
         next_offset += v
     end
 
     # Tailing terminator entry
-    cumulative[end] = (; col = 0, offset = next_offset)
+    cumulative[end] = T(0, next_offset)
     return cumulative
 end
 
-function index!(I::Indexer, A::AbstractArray)
-    empty!(I)
+function prefixsum!(
+    cumulative::AbstractVector{T},
+    histogram::AbstractVector,
+    nnz::Integer,
+) where {T<:ColOffset}
+    resize!(cumulative, nnz + 1)
 
-    # Step 1 - create a histogram of values in the array.
-    (; histogram) = I
-    unsafe_histogram!(histogram, A)
+    # In this case, we need to perf
+    @inbounds for (k, (i, v)) in pairs(histogram)
+        # Skip entries in the histogram that haven't been seen before.
+        iszero(i) && continue
+        cumulative[i] = T(k, v)
+    end
 
-    # Step 2 - convert the histogram into the `cumulative` array that records the
-    # cumulative sum of offsets
-    cumulative = prefixsum!(I)
+    next_offset = 1
+    @inbounds for i in Base.OneTo(length(cumulative) - 1)
+        col, count = cumulative[i]
+        cumulative[i] = T(col, next_offset)
+        next_offset += count
+    end
+    cumulative[end] = T(0, next_offset)
+    return cumulative
+end
 
-    # Step 3 (final pass) - Record the actual locations of columns in the update.
-    (; map) = I
+### Remap
+function remap!(
+    map,
+    cumulative,
+    histogram::Dictionary{K,V},
+    A::AbstractArray,
+) where {K<:Integer,V<:OrderCount}
     resize!(map, length(A))
-    @inbounds for (column, x) in columns(A)
-        _, token = gettoken(histogram, x)
+    @inbounds for (dst_col, src_col) in columns(A)
+        _, token = gettoken(histogram, src_col)
         order, count = gettokenvalue(histogram, token)
 
-        # Work backwards from the next offset
         next_offset = cumulative[order + 1].offset
-        map[next_offset - count] = column
-        settokenvalue!(histogram, token, (order = order, count = count - 1))
+        map[next_offset - count] = dst_col
+        settokenvalue!(histogram, token, V(order, count - one(count)))
     end
+end
+
+function remap!(
+    map,
+    cumulative,
+    histogram::AbstractVector{V},
+    A::AbstractArray,
+) where {V<:OrderCount}
+    resize!(map, length(A))
+    @inbounds for (dst_col, src_col) in columns(A)
+        order, count = histogram[src_col]
+        next_offset = cumulative[order + 1].offset
+        map[next_offset - count] = dst_col
+        histogram[src_col] = V(order, count - one(count))
+    end
+end
+
+#####
+##### Indexers
+#####
+
+# Use an `AbstractIndexer` so we can potentially chunk up an actual `Indexer` for
+# better parallel load balancing.
+abstract type AbstractIndexer end
+gettranslations(I::AbstractIndexer) = I.cumulative, I.map
+gethistogram(I::AbstractIndexer) = I.histogram
+Base.empty!(I::AbstractIndexer) = (shallow_empty!(gethistogram(I)); I)
+
+const HistogramTypes =
+    Union{Dictionary{<:Integer,<:OrderCount},AbstractVector{<:OrderCount}}
+
+struct Indexer{T<:HistogramTypes} <: AbstractIndexer
+    histogram::T
+    # Mapping of source column to its start in the accumulation vector
+    cumulative::Vector{ColOffset{Int}}
+    map::Vector{Int}
+end
+
+const SparseIndexer = Indexer{Dictionary{Int,OrderCount{Int}}}
+const DenseIndexer = Indexer{Vector{OrderCount{Int}}}
+
+Indexer() = SparseIndexer()
+function Indexer{T}() where {T}
+    histogram = T()
+    cumulative = Vector{ColOffset{Int}}()
+    map = Vector{Int}()
+    return Indexer(histogram, cumulative, map)
+end
+
+function index!(I::Indexer, A::AbstractArray, maxindex)
+    (; histogram, cumulative, map) = I
+    resize_histogram!(histogram, maxindex)
+
+    nnz = histogram!(histogram, A)
+    prefixsum!(cumulative, histogram, nnz)
+    remap!(map, cumulative, histogram, A)
     return I
 end
 
@@ -210,8 +303,7 @@ function IndexerView(I::Indexer, num_splits, this_split)
     return IndexerView(I, split_range)
 end
 
-function gettranslations(I::IndexerView)
-    Base.@_inline_meta
+@inline function gettranslations(I::IndexerView)
     cumulative, map = gettranslations(I.I)
     return Base.unsafe_view(cumulative, I.range), map
 end

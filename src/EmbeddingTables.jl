@@ -9,6 +9,8 @@ export AbstractEmbeddingTable, SimpleEmbedding, SplitEmbedding
 export SparseEmbeddingUpdate, Static, Dynamic
 export IndexingContext, NoContext, Forward, Update
 
+export Indexer, DenseIndexer, SparseIndexer
+
 # functions
 export lookup, maplookup, featuresize, example, columnpointer
 

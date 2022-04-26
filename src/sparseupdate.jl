@@ -165,7 +165,7 @@ function update!(
     ::Val{Nontemporal} = Val(true),
     args...,
 ) where {Nontemporal}
-    index!(indexer, update.indices)
+    index!(indexer, update.indices, size(table, 2))
     update!(
         table,
         update,
@@ -200,7 +200,7 @@ function update!(
     opt::Flux.Descent,
     tables::AbstractVector{<:AbstractEmbeddingTable},
     grads::AbstractVector{<:SparseEmbeddingUpdate},
-    indexers::Vector{Indexer},
+    indexers::AbstractVector{<:AbstractIndexer},
     ::Val{Nontemporal} = Val(true);
     num_splits = 4,
     nthreads = Threads.nthreads(),
@@ -209,7 +209,7 @@ function update!(
 ) where {Nontemporal}
     # First, index all of the tables.
     Polyester.@batch (per = thread) for i in eachindex(indexers, grads)
-        index!(indexers[i], grads[i].indices)
+        index!(indexers[i], grads[i].indices, size(tables[i], 2))
     end
     telemetry_cb()
 
