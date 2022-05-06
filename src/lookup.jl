@@ -378,9 +378,10 @@ function ChainRulesCore.rrule(
     I;
     kw...,
 ) where {S}
+    (; prependrows) = strategy
     data = maplookup(strategy, A, I; kw...)
     function maplookup_pullback(Δ)
-        f = Slicer(strategy.prependrows + 1, 1, Δ)
+        f = Slicer(prependrows + 1, 1, Δ)
         δs = map((y, x) -> SparseEmbeddingUpdate{S}(f(featuresize(y)), x), A, I)
         return (NoTangent(), NoTangent(), δs, NoTangent())
     end

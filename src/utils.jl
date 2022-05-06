@@ -54,11 +54,12 @@ mutable struct Slicer{T,N,A<:AbstractArray{T,N}}
 end
 
 function (S::Slicer{T,N})(sz) where {T,N}
-    current_index = S.current_index
+    (; current_index, concat_dim, captured_array) = S
+    current_index = current_index
     range = current_index:(current_index + sz - 1)
-    inds = ntuple(i -> i == S.concat_dim ? range : 1:size(S.captured_array, i), Val(N))
-    S.current_index += sz
-    return view(S.captured_array, inds...)
+    inds = ntuple(i -> i == concat_dim ? range : 1:size(captured_array, i), Val(N))
+    current_index += sz
+    return view(captured_array, inds...)
 end
 
 #####
@@ -158,7 +159,6 @@ end
     for a in A
         thisorder, thiscount = @inbounds(histogram[a])
         seenbefore = !iszero(thisorder)
-
         thisorder = ifelse(seenbefore, thisorder, order + 1)
         order = ifelse(seenbefore, order, order + 1)
         @inbounds histogram[a] = V(thisorder, thiscount + one(thiscount))
@@ -175,6 +175,8 @@ function prefixsum!(
     resize!(cumulative, nnz + 1)
     next_offset = 1
 
+    # N.B. - Dictionaries are ordered on insertion order, which is the order in which
+    # bins in the original domain were observed during histogram creation.
     @inbounds for (k, (i, v)) in pairs(histogram)
         cumulative[i] = T(k, next_offset)
         next_offset += v
@@ -192,19 +194,46 @@ function prefixsum!(
 ) where {T<:ColOffset}
     resize!(cumulative, nnz + 1)
 
-    # In this case, we need to perf
+    # Computing the correct prefix-sum from an array-based histogram is a little involved,
+    # requiring two steps.
+    #
+    # LOOP 1:
+    # First, we iterate through all entries in the array based histogram.
+    # In the first loop the variables have the following meaning:
+    #
+    #   k : The value that was counted (i.e., the "keys" of the histogram).
+    #   i : The order in which `k` was seen whan traversing the original domain.
+    #   v : The number of times `k` was seen in the original domain.
+    #
+    # The first step sorts the histogram bins by observation order (the variable `i`).
+    # This works because we're guarenteed for `i` to be unique and take all values in
+    # `1:nnz`.
+    #
+    # To facilitate the prefix sum in the next step, we temporarily store the count `v`
+    # in the `offset` field of the created `ColOffset` struct.
+    #
+    # LOOP 2:
+    # Here, we actually compute the prefix sum over the histogram counts temporarily
+    # stored in the `offset` fields of the entries in `cumulative`.
+
+    # Loop 1: Sort buckets by the order in which they were observed.
     @inbounds for (k, (i, v)) in pairs(histogram)
         # Skip entries in the histogram that haven't been seen before.
         iszero(i) && continue
+        # Temporarily store the bucket count in the `offset` field of the `ColOffset`
+        # type.
         cumulative[i] = T(k, v)
     end
 
+    # Loop 2: Perform the prefix-sum over the bin counts to actually create an offset.
     next_offset = 1
     @inbounds for i in Base.OneTo(length(cumulative) - 1)
         col, count = cumulative[i]
         cumulative[i] = T(col, next_offset)
         next_offset += count
     end
+
+    # Tailing terminator entry
     cumulative[end] = T(0, next_offset)
     return cumulative
 end
