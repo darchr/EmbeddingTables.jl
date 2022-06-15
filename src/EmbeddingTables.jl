@@ -115,7 +115,7 @@ oneto(x::StaticInt) = One():x
 ##### example
 #####
 
-example(x::Vector{<:AbstractEmbeddingTable}) = example(first(x))
+example(x::AbstractVector{<:AbstractEmbeddingTable}) = example(first(x))
 
 #####
 ##### ArrayInterface compat
