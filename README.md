@@ -272,3 +272,61 @@ indexers = [Indexer() for _ in tables]
 ```julia
 scratchspaces = [EmbeddingTables.scratch(tables[1]) for _ in 1:Threads.nthreads()]`
 ```
+
+-------------
+# AbstractEmbeddingTable
+
+The base type for embedding tables defined as:
+```julia
+AbstractEmbeddingTable{S<:AbstractLookupType,T} <: AbstractArray{T,2}
+```
+where the first type parameter `S <: AbstractLookupType` is one of either
+* `Dynamic`: The feature size (i.e. number of elements in a column) is not known at compile time.
+* `Static{N}`: The feature size is known at compile time with a value of `N`.
+  In general, static embedding tables will enable faster lookups and updates due to superior code generation.
+  
+## AbstractEmbeddingTable API
+
+A type `table` deriving from `AbstractEmbeddingTable{S,T}` must implement the following API:
+* `Base.size(table) -> Tuple{Int,Int}`: Return the size of `table`.
+* `EmbeddingTables.columnpointer(table, column::Integer, [context]) -> Ptr{T}`: Return a pointer to the first element in column `column`.
+  The optional argument `context` will be used by the library to inform the table implementation of the phase of the algorithm.
+  Possible values for `context` are:
+   * `EmbeddingTables.NoContext()`: No contextual information available.
+   * `EmbeddingTables.Forward()`: Pointer access for a lookup operation.
+   * `EmbeddingTables.Update()`: Pointer access for a SGD update operation.
+* `EmbeddingTables.example(table)`: Return an array suitable for passing to `Base.similar`.
+  This is used to construct appropriate destination containers.
+  
+These definitions are sufficient for subtypes of `AbstractEmbeddingTable` to implement the `AbstractArray` interface.
+However, types are permitted to implement more performant methods of the `AbstractArray` interface if desired.
+
+> **Note**
+> 
+> The semantics of `EmbeddingTables.columnpointer` require that all elements in a table's feature vector (i.e., column) are sequential in memory.
+> Note that this *does not* impost any requirement on the layout or ordering of the columns themselves.
+
+## SimpleEmbeddingTable
+
+The minimal embedding table provided by this library is the `SimpleEmbeddingTable`, which is a thin wrapper around an existing array.
+```julia
+julia> using EmbeddingTables
+
+julia> data = ones(Float32, 4, 4);
+
+# Construct a `Dynamic` table
+julia> table_dynamic = SimpleEmbedding(data)
+4×4 SimpleEmbedding{Dynamic, Float32, Matrix{Float32}}:
+ 1.0  1.0  1.0  1.0
+ 1.0  1.0  1.0  1.0
+ 1.0  1.0  1.0  1.0
+ 1.0  1.0  1.0  1.0
+
+# Construct a `Static` table
+julia> table_static = SimpleEmbedding{Static{featuresize(data)}}(data)
+4×4 SimpleEmbedding{Static{4}, Float32, Matrix{Float32}} with indices 1:1:4×Base.OneTo(4):
+ 1.0  1.0  1.0  1.0
+ 1.0  1.0  1.0  1.0
+ 1.0  1.0  1.0  1.0
+ 1.0  1.0  1.0  1.0
+```
