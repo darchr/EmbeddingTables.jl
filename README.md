@@ -75,13 +75,13 @@ julia> lookup(A, inds)
 
 ### `lookup!`
 
-```
+```julia
 lookup!(O::AbstractMatrix, A::AbstractEmbeddingTable, inds)
 ```
 
 In place version of `lookup`.
 That is, `lookup` can be (and is) implemented as
-```
+```julia
 function lookup(A, inds)
     O = destination(A, inds)
     lookup!(O, A, inds)
@@ -92,7 +92,7 @@ where `EmbeddingTables.destination` allocates the appropriate output container.
 
 ### `maplookup`
 
-```
+```julia
 maplookup(
     [strategy::AbstractExecutionStrategy],
     tables::AbstractVector{<:AbstractEmbeddingTable],
@@ -168,9 +168,11 @@ Implemented strategies include:
   Does not use intra-table parallelism (multiple threads working on a single table).
 * `PreallocationStrategy`: Fuse ensemble lookup with a post-op concatenation.
   The result is a single matrix of results where:
-```julia
-maplookup(PreallocationStrategy(), table, indices) == reduce(vcat, maplookup(table, indices))
-```
+  ```julia
+  maplookup(PreallocationStrategy(), table, indices) == reduce(vcat, maplookup(table, indices))
+  ```
+  The `PreallocationStrategy` takes an optional integer argument `prependrows` which will insert `prependrows` before the actual embedding table lookups.
+  This is helpful for workloads like DLRM that concatenate the results of the bottom dense network with the results of embedding table lookups.
   **Note**: This implementation also uses intra-table parallelism.
 
 ### `maplookup!`
@@ -218,7 +220,6 @@ SparseEmbeddingUpdate{Dynamic, Matrix{Float32}, Vector{Int64}}(Float32[1.0 5.0 9
 julia> optimizer = Flux.Descent(0.1)
 
 julia> EmbeddingTables.update!(optimizer, table, gradient); A
-julia> A
 4×4 SimpleEmbedding{Dynamic, Float32, Matrix{Float32}}:
  -0.1  0.0  -0.5  -0.9
  -0.2  0.0  -0.6  -1.0
@@ -230,7 +231,7 @@ The stochastic gradient descent operation comes in two forms, a single-table for
 These are described in detail below.
 
 ### Single Table `update!`
-```
+```julia
 update!(
     opt::Flux.Descent,
     table::AbstractEmbeddingTable,
@@ -246,7 +247,7 @@ In some cases, this can improve performance and rarely harms performance.
 
 ### Multi-Table `update!`.
 
-```
+```julia
 function update!(
     opt::Flux.Descent,
     tables::AbstractVector{<:AbstractEmbeddingTable},
@@ -258,18 +259,16 @@ function update!(
 ```
 This will group together multiple stochastic gradient descent updates in a parallel manner for better performance.
 In this case, the auxiliary `indexers` must be preallocated and passed explicitly, which can be done using
-```
+```julia
 indexers = [Indexer() for _ in tables]
 ```
-** Keywords **
+**Keywords**
 
 * `nthreads::Integer`: The number of threads to use for parallelization. Default: `Threads.nthreads()`.
 * `num_splits::Integer`: The number of chunks to use for intra-table parallelism. Default: 4
 * `scratchspaces::Vector`: Thread local scratch space for partial accumulations.
   Only needed for `Dynamic` embedding tables (described later).
   To avoid allocating these every operation, these can be preallocated using
-```
+```julia
 scratchspaces = [EmbeddingTables.scratch(tables[1]) for _ in 1:Threads.nthreads()]`
 ```
-
-## AbstractEmbeddingTrable
